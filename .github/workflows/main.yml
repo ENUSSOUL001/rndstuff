@@ -1,37 +1,26 @@
 name: Node.js CI Build
-
-on:
-  workflow_dispatch:
-
+on: [workflow_dispatch]
 jobs:
-  build-and-test:
+  run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y clang tmux -qq
+          sudo apt-get update -qq && sudo apt-get install -y clang python3-pip tmux tmate -qq
           npm install -g @charmland/crush qwen-proxy
           echo -e '#!/bin/bash\ncd /home/runner/work/rndstuff/rndstuff/workspace && env -u TMUX tmux new-session -A -s brain' | sudo tee /usr/local/bin/rig
           sudo chmod +x /usr/local/bin/rig
-
-      - run: |
-          git clone https://${{ secrets.GH_SYNC_TOKEN }}@github.com/ENUSSOUL001/Hm.git workspace
-
+      - run: git clone https://${{ secrets.GH_SYNC_TOKEN }}@github.com/ENUSSOUL001/Hm.git workspace
       - run: |
           mkdir -p $HOME/.qwen
           echo '${{ secrets.CACHE_BLOB }}' > $HOME/.qwen/oauth_creds_acc1.json
           echo '${{ secrets.CACHE_BLOB_2 }}' > $HOME/.qwen/oauth_creds_acc2.json
-
       - run: |
           mkdir -p $HOME/.config/crush
           cat << 'EOF' > $HOME/.config/crush/crush.json
@@ -48,13 +37,20 @@ jobs:
             "options": {"tui": {"compact_mode": true}}
           }
           EOF
-
-      - uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          limit-access-to-actor: true
-
       - run: |
           export QWEN_CODE_AUTH_USE=false
           qwen-proxy serve --headless > /home/runner/work/rndstuff/rndstuff/workspace/proxy.log 2>&1 &
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait-for clients
+          while true; do
+            tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
+            sleep 300
+          done &
           sleep 21300
+      - if: always()
+        run: |
+          cd /home/runner/work/rndstuff/rndstuff/workspace
+          git config --global user.name "ENUSSOUL001"
+          git config --global user.email "enussoul@gmail.com"
+          git add .
+          git diff-index --quiet HEAD || (git commit -m "Auto-save: session finished or terminated" && git push)

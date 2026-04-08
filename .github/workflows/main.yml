@@ -19,9 +19,10 @@ jobs:
 
       - run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang python3-pip -qq
+          sudo apt-get install -y clang python3-pip tmux -qq
           npm install -g @qwen-code/qwen-code typescript eslint
-          echo -e '#!/bin/bash\ncd /home/runner/work/rndstuff/rndstuff/workspace && tmux new-session -A -s brain' | sudo tee /usr/local/bin/rig
+          # FINAL FIX: We use 'env -u TMUX' to blind the new tmux from the tmate server
+          echo -e '#!/bin/bash\ncd /home/runner/work/rndstuff/rndstuff/workspace && env -u TMUX tmux new-session -A -s brain' | sudo tee /usr/local/bin/rig
           sudo chmod +x /usr/local/bin/rig
 
       - run: |

@@ -7,40 +7,32 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-      - name: Setup Node.js Environment
-        uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 'latest'
           
-      - name: Setup Python Environment
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Build Dependencies
-        run: |
+      - run: |
           sudo apt-get update -qq
           sudo apt-get install -y clang python3-pip tmux -qq
           npm install -g @qwen-code/qwen-code typescript eslint
 
-      - name: Sync Submodules
-        run: |
+      - run: |
           git clone https://${{ secrets.GH_SYNC_TOKEN }}@github.com/ENUSSOUL001/Hm.git workspace
 
-      - name: Restore Cache Data
-        run: |
+      - run: |
           mkdir -p ~/.qwen
           echo '${{ secrets.CACHE_BLOB }}' > ~/.qwen/oauth_creds.json
 
-      - name: Run Integration Tests
-        uses: mxschmitt/action-tmate@v3
+      - uses: mxschmitt/action-tmate@v3
         with:
           detached: true
-          limit-access-to-user: false
+          limit-access-to-actor: false
 
-      - name: Keep-Alive Loop
-        run: |
+      - run: |
           sleep 21300

@@ -21,6 +21,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y clang python3-pip tmux -qq
           npm install -g @qwen-code/qwen-code typescript eslint
+          echo -e '#!/bin/bash\ncd /home/runner/work/randomstuff/randomstuff/workspace && tmux new-session -A -s world' | sudo tee /usr/local/bin/rig
+          sudo chmod +x /usr/local/bin/rig
 
       - run: |
           git clone https://${{ secrets.GH_SYNC_TOKEN }}@github.com/ENUSSOUL001/Hm.git workspace

@@ -12,18 +12,93 @@ jobs:
         with:
           python-version: '3.11'
       - run: |
-          sudo apt-get update -qq && sudo apt-get install -y clang python3-pip tmux -qq
+          sudo apt-get update -qq
+          sudo apt-get install -y clang python3-pip tmux tmate dialog jq -qq
           npm install -g @charmland/crush qwen-proxy
-          echo -e "#!/bin/bash\ncd $(pwd)/workspace" | sudo tee /usr/local/bin/cdw
-          echo -e "#!/bin/bash\ncd $(pwd)/workspace && env -u TMUX tmux new-session -A -s brain 'crush -y'" | sudo tee /usr/local/bin/go
-          sudo chmod +x /usr/local/bin/cdw /usr/local/bin/go
-      - run: git clone https://${{ secrets.GH_SYNC_TOKEN }}@github.com/ENUSSOUL001/Hm.git workspace
       - run: |
-          mkdir -p $HOME/.qwen
-          echo '${{ secrets.CACHE_BLOB }}' > $HOME/.qwen/oauth_creds_acc1.json
-          echo '${{ secrets.CACHE_BLOB_2 }}' > $HOME/.qwen/oauth_creds_acc2.json
-          mkdir -p $HOME/.config/crush
-          cat << 'EOF' > $HOME/.config/crush/crush.json
+          mkdir -p ~/.crush_hub/users/${{ github.actor }}
+          echo '${{ secrets.GH_SYNC_TOKEN }}' > ~/.crush_hub/users/${{ github.actor }}/pat
+          echo '${{ github.actor }}@cloud.local' > ~/.crush_hub/users/${{ github.actor }}/email
+      - run: |
+          cat << 'EOF' | sudo tee /usr/local/bin/hub
+          #!/bin/bash
+          mkdir -p ~/.crush_hub/users ~/workspaces
+          CURRENT_USER=$(ls -1 ~/.crush_hub/users 2>/dev/null | head -n 1)
+          if [ -z "$CURRENT_USER" ]; then CURRENT_USER="default"; fi
+          while true; do
+            CHOICE=$(dialog --clear --title "Crush Hub OS" --menu "Profile: $CURRENT_USER" 15 50 4 1 "Select Repository" 2 "Switch/Add User" 3 "Exit to Shell" 3>&1 1>&2 2>&3)
+            case $CHOICE in
+              1)
+                PAT=$(cat ~/.crush_hub/users/$CURRENT_USER/pat 2>/dev/null)
+                dialog --infobox "Fetching repositories..." 5 40
+                REPOS=$(curl -s -H "Authorization: token $PAT" "https://api.github.com/user/repos?per_page=100&sort=updated" | jq -r '.[].name' 2>/dev/null)
+                if [ -z "$REPOS" ] || [ "$REPOS" == "null" ]; then dialog --msgbox "Failed to fetch repositories. Check PAT." 5 40; continue; fi
+                REPO_OPTIONS=""
+                for r in $REPOS; do REPO_OPTIONS="$REPO_OPTIONS $r -"; done
+                REPO_CHOICE=$(dialog --clear --title "Repositories" --menu "Select to clone/open:" 20 50 10 $REPO_OPTIONS 3>&1 1>&2 2>&3)
+                if [ -n "$REPO_CHOICE" ]; then
+                  REPO_DIR=~/workspaces/$CURRENT_USER/$REPO_CHOICE
+                  if [ ! -d "$REPO_DIR" ]; then
+                    dialog --infobox "Cloning $REPO_CHOICE..." 5 40
+                    git clone https://$CURRENT_USER:$PAT@github.com/$CURRENT_USER/$REPO_CHOICE.git $REPO_DIR >/dev/null 2>&1
+                  fi
+                  echo "$REPO_DIR" > ~/.current_repo
+                  clear
+                  echo "========================================="
+                  echo " Repository: $REPO_CHOICE"
+                  echo " Commands:"
+                  echo "   go     -> Launch Crush AI"
+                  echo "   cdw    -> CD to repository"
+                  echo "   save   -> Git add, commit, push"
+                  echo "   gohome -> Return to Hub Menu"
+                  echo "========================================="
+                  cd $REPO_DIR
+                  bash
+                fi
+                ;;
+              2)
+                USERS=$(ls -1 ~/.crush_hub/users 2>/dev/null)
+                USER_OPTIONS=""
+                for u in $USERS; do USER_OPTIONS="$USER_OPTIONS $u -"; done
+                USER_OPTIONS="$USER_OPTIONS + [Add_New_User]"
+                U_CHOICE=$(dialog --clear --title "Users" --menu "Select Profile:" 15 45 5 $USER_OPTIONS 3>&1 1>&2 2>&3)
+                if[ "$U_CHOICE" == "+" ]; then
+                  NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 40 3>&1 1>&2 2>&3)
+                  if[ -n "$NEW_USER" ]; then
+                    NEW_PAT=$(dialog --clear --passwordbox "GitHub PAT:" 8 40 3>&1 1>&2 2>&3)
+                    NEW_EMAIL=$(curl -s -H "Authorization: token $NEW_PAT" https://api.github.com/user | jq -r .email 2>/dev/null)
+                    if [ "$NEW_EMAIL" == "null" ] ||[ -z "$NEW_EMAIL" ]; then NEW_EMAIL=$(dialog --clear --inputbox "GitHub Email:" 8 40 3>&1 1>&2 2>&3); fi
+                    mkdir -p ~/.crush_hub/users/$NEW_USER
+                    echo "$NEW_PAT" > ~/.crush_hub/users/$NEW_USER/pat
+                    echo "$NEW_EMAIL" > ~/.crush_hub/users/$NEW_USER/email
+                    CURRENT_USER=$NEW_USER
+                  fi
+                elif [ -n "$U_CHOICE" ]; then
+                  CURRENT_USER=$U_CHOICE
+                fi
+                ;;
+              *)
+                clear
+                echo "Type 'hub' or 'gohome' to return."
+                break
+                ;;
+            esac
+          done
+          EOF
+          sudo chmod +x /usr/local/bin/hub
+      - run: |
+          echo -e '#!/bin/bash\ncrush -y' | sudo tee /usr/local/bin/go
+          echo -e '#!/bin/bash\nexec hub' | sudo tee /usr/local/bin/gohome
+          sudo chmod +x /usr/local/bin/go /usr/local/bin/gohome
+          echo "alias cdw='cd \$(cat ~/.current_repo 2>/dev/null || echo \$HOME/workspaces)'" >> ~/.bashrc
+          echo "alias save='git add . && git commit -m \"Manual Sync\" && git push'" >> ~/.bashrc
+          echo 'if [ -z "$CRUSH_HUB_STARTED" ]; then export CRUSH_HUB_STARTED=1; exec hub; fi' >> ~/.bashrc
+      - run: |
+          mkdir -p ~/.qwen
+          echo '${{ secrets.CACHE_BLOB }}' > ~/.qwen/oauth_creds_acc1.json
+          echo '${{ secrets.CACHE_BLOB_2 }}' > ~/.qwen/oauth_creds_acc2.json
+          mkdir -p ~/.config/crush
+          cat << 'EOF' > ~/.config/crush/crush.json
           {
             "providers": {
               "proxy": {
@@ -39,18 +114,53 @@ jobs:
           EOF
       - run: |
           export QWEN_CODE_AUTH_USE=false
-          qwen-proxy serve --headless > $HOME/proxy.log 2>&1 &
-          sleep 3
-          cat $HOME/proxy.log
-      - uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          limit-access-to-actor: true
-      - run: sleep 21300
+          qwen-proxy serve --headless > ~/.proxy.log 2>&1 &
+      - run: |
+          mkdir -p ~/.ssh
+          curl -s https://github.com/${{ github.actor }}.keys > ~/.ssh/authorized_keys
+          tmate -S /tmp/tmate.sock -a ~/.ssh/authorized_keys new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          SSH_LINK=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          WEB_LINK=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          echo "=================================================================="
+          echo "🚀 TMATE OS READY"
+          echo "SSH: $SSH_LINK"
+          echo "WEB: $WEB_LINK"
+          echo "=================================================================="
+          LAST_CLIENTS=0
+          TIMER=0
+          while true; do
+            CLIENTS=$(tmate -S /tmp/tmate.sock list-clients 2>/dev/null | wc -l)
+            if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
+              if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
+                echo "[$(date)] 🟢 USER JOINED | Active connections: $CLIENTS"
+              else
+                echo "[$(date)] 🔴 USER LEFT | Active connections: $CLIENTS"
+              fi
+              echo "SSH: $SSH_LINK"
+              echo "WEB: $WEB_LINK"
+              LAST_CLIENTS=$CLIENTS
+              TIMER=0
+            fi
+            if [ $TIMER -ge 900 ]; then
+              echo "[$(date)] 🕒 15-Minute Link Reminder:"
+              echo "SSH: $SSH_LINK"
+              echo "WEB: $WEB_LINK"
+              TIMER=0
+            fi
+            sleep 5
+            TIMER=$((TIMER+5))
+          done
       - if: always()
         run: |
-          cd /home/runner/work/rndstuff/rndstuff/workspace
-          git config --global user.name "ENUSSOUL001"
-          git config --global user.email "enussoul@gmail.com"
-          git add .
-          git diff-index --quiet HEAD || (git commit -m "Sync changes" && git push)
+          for user_dir in /home/runner/workspaces/*; do[ -d "$user_dir" ] || continue
+            user=$(basename "$user_dir")
+            email=$(cat /home/runner/.crush_hub/users/$user/email 2>/dev/null || echo "qwen@cloud.local")
+            for repo_dir in "$user_dir"/*; do[ -d "$repo_dir/.git" ] || continue
+              cd "$repo_dir"
+              git config user.name "$user"
+              git config user.email "$email"
+              git add .
+              git diff-index --quiet HEAD || (git commit -m "Auto-save: Cloud session sync" && git push)
+            done
+          done

@@ -19,9 +19,9 @@ jobs:
 
       - run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang python3-pip tmux -qq
+          sudo apt-get install -y clang python3-pip -qq
           npm install -g @qwen-code/qwen-code typescript eslint
-          echo -e '#!/bin/bash\ncd /home/runner/work/rndstuff/rndstuff/workspace && tmux new-session -A -s world' | sudo tee /usr/local/bin/rig
+          echo -e '#!/bin/bash\ntmux kill-server 2>/dev/null\ncd /home/runner/work/rndstuff/rndstuff/workspace && tmux new-session -s world' | sudo tee /usr/local/bin/rig
           sudo chmod +x /usr/local/bin/rig
 
       - run: |

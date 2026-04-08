@@ -1,38 +1,71 @@
 name: Node.js CI Build
-on: [workflow_dispatch]
+
+on:
+  workflow_dispatch:
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
       - uses: actions/setup-node@v6
         with:
           node-version: 'latest'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - run: |
-          sudo apt-get update -qq && sudo apt-get install -y clang tmux -qq
-          npm install -g @charmland/crush
+          sudo apt-get update -qq
+          sudo apt-get install -y clang tmux -qq
+          npm install -g @charmland/crush qwen-proxy typescript eslint
           echo -e '#!/bin/bash\ncd /home/runner/work/rndstuff/rndstuff/workspace && env -u TMUX tmux new-session -A -s brain' | sudo tee /usr/local/bin/rig
           sudo chmod +x /usr/local/bin/rig
+
       - run: |
           git clone https://${{ secrets.GH_SYNC_TOKEN }}@github.com/ENUSSOUL001/Hm.git workspace
+
+      - run: |
+          mkdir -p ~/.qwen
+          echo '${{ secrets.CACHE_BLOB }}' > ~/.qwen/oauth_creds.json
+
       - run: |
           mkdir -p ~/.config/crush
           cat << 'EOF' > ~/.config/crush/crush.json
           {
             "providers": {
-              "alibaba": {
-                "name": "Alibaba Cloud",
+              "proxy": {
+                "name": "Qwen Proxy (Free)",
                 "type": "openai-compat",
-                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                "api_key": "${{ secrets.ALIBABA_API_KEY }}",
-                "models": [{"id": "qwen3.6-plus", "name": "Qwen 3.6 Plus", "context_window": 1000000}]
+                "base_url": "http://localhost:8080/v1",
+                "api_key": "dummy-key",
+                "models":[
+                  {
+                    "id": "coder-model",
+                    "name": "Qwen 3.6 Plus",
+                    "context_window": 1000000,
+                    "default_max_tokens": 65536
+                  }
+                ]
               }
             },
-            "options": {"tui": {"compact_mode": true}}
+            "options": {
+              "tui": {
+                "compact_mode": true
+              }
+            }
           }
           EOF
+
+      - run: |
+          qwen-proxy serve --headless &
+
       - uses: mxschmitt/action-tmate@v3
         with:
           detached: true
           limit-access-to-actor: true
-      - run: sleep 21300
+
+      - run: |
+          sleep 21300

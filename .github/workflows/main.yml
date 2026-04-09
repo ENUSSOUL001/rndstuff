@@ -92,7 +92,7 @@ jobs:
           uv pip install -e ".[all]" -q
           sudo ln -sf /opt/hermes-agent/venv/bin/hermes /usr/local/bin/hermes
           echo "export PATH=\"/opt/hermes-agent/venv/bin:\$PATH\"" >> ~/.bashrc
-          hermes --version 2>/dev/null || echo "hermes installed"
+          hermes --version 2>/dev/null || echo "hermes installed (version flag may not exist)"
 
       - name: Build Secret Encryption Helper
         run: |
@@ -165,7 +165,7 @@ jobs:
             if [ -z "$repo" ]; then
               dialog --msgbox "ERROR: GitHub repo not set." 7 52; return 1
             fi
-            if [ -z "$sname" ] || [ -z "$sval" ]; then
+            if[ -z "$sname" ] || [ -z "$sval" ]; then
               dialog --msgbox "ERROR: Secret name or value is empty." 5 45; return 1
             fi
             local pk_json
@@ -174,7 +174,7 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/$repo/actions/secrets/public-key" 2>/dev/null)
-            if [ -z "$pk_json" ] || [ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
+            if[ -z "$pk_json" ] || [ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
               dialog --msgbox "ERROR: Could not fetch repo public key.\nCheck PAT has repo scope." 7 58
               return 1
             fi
@@ -202,8 +202,11 @@ jobs:
           hub_save_repo() {
             local repo_path="$1"
             local msg="${2:-Cloud session sync $(date -u '+%Y-%m-%d %H:%M UTC')}"
-            local user="${3:-$(hub_active_user)}"
-            [ -d "$repo_path/.git" ] || return 1
+            local user="${3:-$(hub_active_user)}"[ -d "$repo_path/.git" ] || return 1
+            if[ -f "$repo_path/.noautosave" ]; then
+              echo "  ⏭  $(basename "$repo_path") — skipped (auto-save disabled)"
+              return 0
+            fi
             (
               cd "$repo_path" || return 1
               git config user.name  "$user"
@@ -287,9 +290,8 @@ jobs:
                 4)
                   local sname sval
                   sname=$(dialog --clear --inputbox "Secret name (e.g. MY_API_KEY):" 8 52 3>&1 1>&2 2>&3)
-                  if [ -n "$sname" ]; then
-                    sval=$(dialog --clear --passwordbox "Secret value:" 8 52 3>&1 1>&2 2>&3)
-                    [ -n "$sval" ] && hub_push_secret "$sname" "$sval"
+                  if[ -n "$sname" ]; then
+                    sval=$(dialog --clear --passwordbox "Secret value:" 8 52 3>&1 1>&2 2>&3)[ -n "$sval" ] && hub_push_secret "$sname" "$sval"
                   fi
                   ;;
                 5)
@@ -305,7 +307,7 @@ jobs:
           _menu_repos() {
             local PAT
             PAT="$(hub_user_pat "$CURRENT_USER")"
-            if [ -z "$PAT" ]; then
+            if[ -z "$PAT" ]; then
               dialog --msgbox "No PAT found for '$CURRENT_USER'.\nUse option 2 to add/switch user." 7 52
               return
             fi
@@ -330,7 +332,7 @@ jobs:
               "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
             local SHORT="${REPO_CHOICE##*/}"
             local REPO_DIR="$WORKSPACES/$CURRENT_USER/$SHORT"
-            if [ ! -d "$REPO_DIR/.git" ]; then
+            if[ ! -d "$REPO_DIR/.git" ]; then
               dialog --infobox "Cloning $REPO_CHOICE ..." 4 52
               if ! git clone \
                   "https://$CURRENT_USER:$PAT@github.com/$REPO_CHOICE.git" \
@@ -348,15 +350,15 @@ jobs:
             printf '║  ✅ %-44s ║\n' "$SHORT"
             printf '║  📁 %-44s ║\n' "$REPO_DIR"
             printf '╠══════════════════════════════════════════════════╣\n'
-            printf '║  h [prompt]  → Hermes AI (1M Isolated Brain)     ║\n'
-            printf '║  cdw         → jump to this repo root            ║\n'
-            printf '║  go [name]   → switch to another repo            ║\n'
-            printf '║  save [msg]  → git add + commit + push           ║\n'
-            printf '║  nosave      → DISABLE auto-save for this repo   ║\n'
-            printf '║  yessave     → ENABLE auto-save for this repo    ║\n'
-            printf '║  secrets     → manage GitHub secrets             ║\n'
-            printf '║  links       → show SSH/browser access links     ║\n'
-            printf '║  hub         → back to main menu                 ║\n'
+            printf '║  h [prompt]   → Hermes AI (isolated brain)       ║\n'
+            printf '║  cdw          → jump to this repo root           ║\n'
+            printf '║  go [name]    → switch to another repo           ║\n'
+            printf '║  save [msg]   → git add + commit + push          ║\n'
+            printf '║  noautosave   → disable auto-save for this repo  ║\n'
+            printf '║  autosave_on  → re-enable auto-save              ║\n'
+            printf '║  secrets      → manage GitHub secrets            ║\n'
+            printf '║  links        → show SSH/browser access links    ║\n'
+            printf '║  hub          → back to main menu                ║\n'
             printf '╚══════════════════════════════════════════════════╝\n'
             printf '\e[0m\n'
             bash --rcfile <(cat ~/.bashrc; echo "cd '$REPO_DIR'")
@@ -378,21 +380,19 @@ jobs:
                 NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)
                 [ -z "$NEW_USER" ] && return
                 NEW_PAT=$(dialog --clear --passwordbox \
-                  "GitHub PAT\n(needs: repo + workflow scopes, classic PAT):" 10 54 3>&1 1>&2 2>&3)
-                [ -z "$NEW_PAT" ] && return
+                  "GitHub PAT\n(needs: repo + workflow scopes, classic PAT):" 10 54 3>&1 1>&2 2>&3)[ -z "$NEW_PAT" ] && return
                 dialog --infobox "Verifying credentials with GitHub API..." 4 48
                 PROFILE=$(curl -sf \
                   -H "Authorization: token $NEW_PAT" \
                   https://api.github.com/user 2>/dev/null)
-                if [ -z "$PROFILE" ] || [ "$(echo "$PROFILE" | jq -r '.login // empty')" = "" ]; then
+                if [ -z "$PROFILE" ] ||[ "$(echo "$PROFILE" | jq -r '.login // empty')" = "" ]; then
                   dialog --msgbox "ERROR: Could not verify credentials.\nCheck the PAT is valid and not expired." 7 54
                   return
                 fi
                 NEW_EMAIL=$(echo "$PROFILE" | jq -r '.email // empty')
-                if [ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then
+                if[ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then
                   NEW_EMAIL=$(dialog --clear --inputbox \
-                    "Email not on public profile.\nEnter your git commit email:" 9 54 3>&1 1>&2 2>&3)
-                  [ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"
+                    "Email not on public profile.\nEnter your git commit email:" 9 54 3>&1 1>&2 2>&3)[ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"
                 fi
                 mkdir -p "$USERS_DIR/$NEW_USER"
                 printf '%s' "$NEW_PAT"   > "$USERS_DIR/$NEW_USER/pat"
@@ -418,12 +418,7 @@ jobs:
           _save_all() {
             dialog --infobox "Saving all open repositories..." 4 42
             local results=""
-            for repo_dir in "$WORKSPACES/$CURRENT_USER"/*/; do
-              [ -d "$repo_dir/.git" ] || continue
-              if [ -f "$repo_dir/.nosave" ]; then
-                results+="  ⏭ $(basename "$repo_dir") — auto-save disabled\n"
-                continue
-              fi
+            for repo_dir in "$WORKSPACES/$CURRENT_USER"/*/; do[ -d "$repo_dir/.git" ] || continue
               local out
               out=$(hub_save_repo "$repo_dir" "Manual cloud save" "$CURRENT_USER")
               results+="$out\n"
@@ -474,17 +469,17 @@ jobs:
           │  cdw          → cd to current repo root               │
           │  go [name]    → switch repos (fuzzy / picker)         │
           │  save [msg]   → commit and push current repo          │
-          │  nosave       → disable auto-commit for this repo     │
-          │  yessave      → enable auto-commit for this repo      │
+          │  noautosave   → exclude this repo from auto-saving    │
           │  secrets      → push secrets to GitHub                │
           │  links        → show SSH / browser access links       │
-          │  h [prompt]   → Hermes AI (1M context / 6h timeout)   │
+          │  h [prompt]   → Hermes AI with isolated brain         │
           │                                                        │
           │  Tmux (when attached via SSH):                         │
           │  Ctrl+B c      new window                             │
           │  Ctrl+B n/p    next / previous window                 │
           │  Ctrl+B 1-9    jump to window number                  │
           │  Ctrl+B d      detach (session stays alive!)          │
+          │  Ctrl+B m      Toggle Mouse ON/OFF (to swipe scroll)  │
           └────────────────────────────────────────────────────────┘
           SHELLTIP
                 break
@@ -509,7 +504,7 @@ jobs:
           DISALLOWED="workspace workspaces runner home"
 
           for d in $DISALLOWED; do
-            if [ "$REPO_NAME" = "$d" ]; then
+            if[ "$REPO_NAME" = "$d" ]; then
               printf '\e[1;31m❌ cd into a repository first before launching Hermes.\e[0m\n'
               printf '   Current dir: %s\n' "$PWD"
               printf '   Use: go <repo-name>  or  cdw\n'
@@ -520,28 +515,27 @@ jobs:
           export HERMES_HOME="$HOME/.hermes/profiles/$REPO_NAME"
           mkdir -p "$HERMES_HOME"
 
-          if [ ! -f "$HERMES_HOME/config.yaml" ] && [ -f "$HOME/.hermes/config.yaml" ]; then
+          if[ ! -f "$HERMES_HOME/config.yaml" ] &&[ -f "$HOME/.hermes/config.yaml" ]; then
             cp "$HOME/.hermes/config.yaml" "$HERMES_HOME/config.yaml"
           fi
 
-          if [ ! -f "$HERMES_HOME/.env" ] && [ -f "$HOME/.hermes/.env" ]; then
+          if [ ! -f "$HERMES_HOME/.env" ] &&[ -f "$HOME/.hermes/.env" ]; then
             cp "$HOME/.hermes/.env" "$HERMES_HOME/.env"
           fi
 
           printf '\e[1;36m'
-          printf '┌──────────────────────────────────────────────────┐\n'
-          printf '│  🧠 Hermes — isolated brain: [%s]\n' "$REPO_NAME"
+          printf '┌──────────────────────────────────────────────┐\n'
+          printf '│  🧠 Hermes — isolated brain:[%s]\n' "$REPO_NAME"
           printf '│  Profile: %s\n' "$HERMES_HOME"
-          printf '│  Context: 1,000,000 | Timeout: 6h | Iters: 1000  │\n'
-          printf '│  Model:   openai/qwen3.6-plus via Qwen Proxy     │\n'
-          printf '└──────────────────────────────────────────────────┘\n'
+          printf '│  Model:   qwen3.6-plus via Qwen Proxy        │\n'
+          printf '└──────────────────────────────────────────────┘\n'
           printf '\e[0m\n'
 
           exec hermes "$@"
           HEOF
           sudo chmod +x /usr/local/bin/h
 
-      - name: Build Helper Tools (save, secrets, links, nosave)
+      - name: Build Helper Tools (save, secrets, links, noautosave)
         run: |
           sudo tee /usr/local/bin/save > /dev/null << 'SAVEEOF'
           #!/bin/bash
@@ -568,36 +562,13 @@ jobs:
           SAVEEOF
           sudo chmod +x /usr/local/bin/save
 
-          sudo tee /usr/local/bin/nosave > /dev/null << 'NOEOF'
-          #!/bin/bash
-          if [ -d .git ]; then
-            touch .nosave
-            printf '\e[1;33m⏭  Auto-save DISABLED for: %s\e[0m\n' "$(basename "$PWD")"
-          else
-            printf '❌ Not a git repo root.\n'
-          fi
-          NOEOF
-          sudo chmod +x /usr/local/bin/nosave
-
-          sudo tee /usr/local/bin/yessave > /dev/null << 'YESEOF'
-          #!/bin/bash
-          if [ -f .nosave ]; then
-            rm .nosave
-            printf '\e[1;32m✅ Auto-save ENABLED for: %s\e[0m\n' "$(basename "$PWD")"
-          else
-            printf 'Auto-save was already enabled.\n'
-          fi
-          YESEOF
-          sudo chmod +x /usr/local/bin/yessave
-
           sudo tee /usr/local/bin/secrets > /dev/null << 'SECEOF'
           #!/bin/bash
           source /usr/local/lib/hubos/lib.sh
           _push_custom() {
             local SNAME SVAL
             SNAME=$(dialog --clear --inputbox "Secret name:" 8 50 3>&1 1>&2 2>&3) || return
-            SVAL=$(dialog --clear --passwordbox "Secret value:" 8 50 3>&1 1>&2 2>&3) || return
-            [ -n "$SNAME" ] && [ -n "$SVAL" ] && hub_push_secret "$SNAME" "$SVAL"
+            SVAL=$(dialog --clear --passwordbox "Secret value:" 8 50 3>&1 1>&2 2>&3) || return[ -n "$SNAME" ] && [ -n "$SVAL" ] && hub_push_secret "$SNAME" "$SVAL"
           }
           while true; do
             CHOICE=$(dialog --clear --title "🔐 Secret Manager" \
@@ -610,7 +581,7 @@ jobs:
               3>&1 1>&2 2>&3) || break
             case "$CHOICE" in
               1) v=$(dialog --clear --passwordbox "PAT value:" 8 50 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v" ;;
-              2) v=$(dialog --clear --inputbox "CACHE_BLOB:" 10 60 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v" ;;
+              2) v=$(dialog --clear --inputbox "CACHE_BLOB:" 10 60 3>&1 1>&2 2>&3);[ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v" ;;
               3) v=$(dialog --clear --inputbox "CACHE_BLOB_2:" 10 60 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v" ;;
               4) _push_custom ;;
               5) break ;;
@@ -634,7 +605,7 @@ jobs:
           cdw() {
             local REPO
             REPO="$(hub_current_repo)"
-            if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
+            if[ -z "$REPO" ] || [ ! -d "$REPO" ]; then
               printf 'No repo set. Use hub → Select Repository, or: go <name>\n'
               return 1
             fi
@@ -654,8 +625,7 @@ jobs:
                 return 1
               fi
             else
-              while IFS= read -r d; do
-                [ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "→ $d")
+              while IFS= read -r d; do[ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "→ $d")
               done < <(find "$WORKDIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
               if [ ${#OPTS[@]} -eq 0 ]; then
                 printf 'No local repos found. Clone one via hub (option 1).\n'
@@ -667,6 +637,19 @@ jobs:
             fi
             hub_set_repo "$TARGET"
             cd "$TARGET" && printf '📁 %s\n' "$TARGET"
+          }
+
+          noautosave() {
+            local REPO="$(hub_current_repo)"[ -z "$REPO" ] && echo "Not in a workspace!" && return 1
+            touch "$REPO/.noautosave"
+            echo "🚫 Auto-save disabled for $(basename "$REPO")."
+          }
+
+          autosave_on() {
+            local REPO="$(hub_current_repo)"
+            [ -z "$REPO" ] && echo "Not in a workspace!" && return 1
+            rm -f "$REPO/.noautosave"
+            echo "✅ Auto-save enabled for $(basename "$REPO")."
           }
           RCEOF
 
@@ -689,18 +672,12 @@ jobs:
         run: |
           mkdir -p ~/.hermes
           cat > ~/.hermes/config.yaml << 'EOF'
-          model:
-            default: openai/qwen3.6-plus
-            api_mode: openai
-            context_window: 1000000
-            max_input_tokens: 1000000
-            provider: custom
-            base_url: http://localhost:8080/v1
+          model: openai/qwen3.6-plus
           agent:
+            max_iterations: 1000
             max_context: 1000000
             compaction_threshold: 995000
             subagent_context_window: 1000000
-            max_iterations: 1000
           tools:
             timeout: 21600
           api:
@@ -709,6 +686,7 @@ jobs:
             skin: default
             verbose: true
           EOF
+
           cat > ~/.hermes/.env << 'EOF'
           OPENAI_API_KEY=dummy
           OPENAI_BASE_URL=http://localhost:8080/v1
@@ -734,6 +712,8 @@ jobs:
           set -g escape-time 10
           set -g renumber-windows on
           set -g allow-rename off
+          
+          bind m set -g mouse \; display "Mouse: #{?mouse,ON,OFF}"
           bind r source-file ~/.tmux.conf \; display "Config reloaded"
           bind H run-shell "hub"
           bind S run-shell "save"
@@ -743,6 +723,7 @@ jobs:
       - name: Start Qwen Proxy and Verify
         run: |
           export QWEN_CODE_AUTH_USE=false
+          export DEFAULT_MAX_TOKENS=65536
           qwen-proxy serve --headless > ~/proxy.log 2>&1 &
           PROXY_PID=$!
           echo "Qwen proxy started (PID $PROXY_PID), waiting for startup..."
@@ -816,7 +797,7 @@ jobs:
           TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
           TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
 
-          if [ "$TMATE_SSH" = "unavailable" ]; then
+          if[ "$TMATE_SSH" = "unavailable" ]; then
             echo "⚠️  tmate session not ready — retrying in 5s..."
             sleep 5
             TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
@@ -865,6 +846,7 @@ jobs:
           echo "║  pkg install openssh && $TMATE_SSH"
           echo "╠══════════════════════════════════════════════════════════════════╣"
           echo "║  Tmux: Ctrl+B c=new  n=next  p=prev  [1-9]=jump  d=detach"
+          echo "║        Ctrl+B m=toggle Mouse ON/OFF (to swipe scroll in Termux)  ║"
           echo "╚══════════════════════════════════════════════════════════════════╝"
           echo ""
 
@@ -873,7 +855,7 @@ jobs:
 
           while true; do
             CLIENTS=$(tmate -S /tmp/tmate.sock list-clients 2>/dev/null | wc -l)
-            if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
+            if[ "$CLIENTS" != "$LAST_CLIENTS" ]; then
               if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
                 echo "[$(date -u '+%H:%M:%S')] 🟢 USER JOINED  — active: $CLIENTS"
               else
@@ -901,10 +883,6 @@ jobs:
             USER="$(basename "$user_dir")"
             for repo_dir in "$user_dir"*/; do
               [ -d "$repo_dir/.git" ] || continue
-              if [ -f "$repo_dir/.nosave" ]; then
-                echo "⏭  Skipping $(basename "$repo_dir") (auto-save disabled via .nosave)"
-                continue
-              fi
               hub_save_repo "$repo_dir" \
                 "Auto-save: runner exit $(date -u '+%Y-%m-%d %H:%M UTC')" \
                 "$USER"

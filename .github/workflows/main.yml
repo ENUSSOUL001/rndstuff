@@ -116,6 +116,7 @@ jobs:
         run: |
           sudo mkdir -p /usr/local/lib/hubos
           sudo tee /usr/local/lib/hubos/lib.sh > /dev/null << 'LIBEOF'
+          #!/bin/bash
           export HUB_DIR="$HOME/.crush_hub"
           export USERS_DIR="$HUB_DIR/users"
           export WORKSPACES="$HOME/workspaces"
@@ -159,7 +160,7 @@ jobs:
           hub_push_secret() {
             local sname="$1" sval="$2" pat="${3:-$(hub_user_pat)}" repo
             repo="$(hub_github_repo)"
-            if[ -z "$pat" ]; then
+            if [ -z "$pat" ]; then
               dialog --msgbox "ERROR: No PAT found for current user." 7 52; return 1
             fi
             if [ -z "$repo" ]; then
@@ -174,7 +175,7 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/$repo/actions/secrets/public-key" 2>/dev/null)
-            if [ -z "$pk_json" ] ||[ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
+            if [ -z "$pk_json" ] || [ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
               dialog --msgbox "ERROR: Could not fetch repo public key.\nCheck PAT has repo scope." 7 58
               return 1
             fi
@@ -202,8 +203,9 @@ jobs:
           hub_save_repo() {
             local repo_path="$1"
             local msg="${2:-Cloud session sync $(date -u '+%Y-%m-%d %H:%M UTC')}"
-            local user="${3:-$(hub_active_user)}"[ -d "$repo_path/.git" ] || return 1
-            if[ -f "$repo_path/.noautosave" ]; then
+            local user="${3:-$(hub_active_user)}"
+            [ -d "$repo_path/.git" ] || return 1
+            if [ -f "$repo_path/.noautosave" ]; then
               echo "  ⏭  $(basename "$repo_path") — skipped (auto-save disabled)"
               return 0
             fi
@@ -227,7 +229,7 @@ jobs:
               if ! tmux list-windows -t "$TMUX_SESSION" -F '#W' 2>/dev/null | grep -qx "$win_name"; then
                 tmux new-window -t "$TMUX_SESSION" -n "$win_name" 2>/dev/null
               fi
-              if[ -n "$TMUX" ]; then
+              if [ -n "$TMUX" ]; then
                 tmux select-window -t "$TMUX_SESSION:$win_name" 2>/dev/null
               fi
             fi
@@ -290,8 +292,9 @@ jobs:
                 4)
                   local sname sval
                   sname=$(dialog --clear --inputbox "Secret name (e.g. MY_API_KEY):" 8 52 3>&1 1>&2 2>&3)
-                  if[ -n "$sname" ]; then
-                    sval=$(dialog --clear --passwordbox "Secret value:" 8 52 3>&1 1>&2 2>&3)[ -n "$sval" ] && hub_push_secret "$sname" "$sval"
+                  if [ -n "$sname" ]; then
+                    sval=$(dialog --clear --passwordbox "Secret value:" 8 52 3>&1 1>&2 2>&3)
+                    [ -n "$sval" ] && hub_push_secret "$sname" "$sval"
                   fi
                   ;;
                 5)
@@ -307,7 +310,7 @@ jobs:
           _menu_repos() {
             local PAT
             PAT="$(hub_user_pat "$CURRENT_USER")"
-            if[ -z "$PAT" ]; then
+            if [ -z "$PAT" ]; then
               dialog --msgbox "No PAT found for '$CURRENT_USER'.\nUse option 2 to add/switch user." 7 52
               return
             fi
@@ -332,7 +335,7 @@ jobs:
               "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
             local SHORT="${REPO_CHOICE##*/}"
             local REPO_DIR="$WORKSPACES/$CURRENT_USER/$SHORT"
-            if[ ! -d "$REPO_DIR/.git" ]; then
+            if [ ! -d "$REPO_DIR/.git" ]; then
               dialog --infobox "Cloning $REPO_CHOICE ..." 4 52
               if ! git clone \
                   "https://$CURRENT_USER:$PAT@github.com/$REPO_CHOICE.git" \
@@ -380,12 +383,13 @@ jobs:
                 NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)
                 [ -z "$NEW_USER" ] && return
                 NEW_PAT=$(dialog --clear --passwordbox \
-                  "GitHub PAT\n(needs: repo + workflow scopes, classic PAT):" 10 54 3>&1 1>&2 2>&3)[ -z "$NEW_PAT" ] && return
+                  "GitHub PAT\n(needs: repo + workflow scopes, classic PAT):" 10 54 3>&1 1>&2 2>&3)
+                [ -z "$NEW_PAT" ] && return
                 dialog --infobox "Verifying credentials with GitHub API..." 4 48
                 PROFILE=$(curl -sf \
                   -H "Authorization: token $NEW_PAT" \
                   https://api.github.com/user 2>/dev/null)
-                if [ -z "$PROFILE" ] ||[ "$(echo "$PROFILE" | jq -r '.login // empty')" = "" ]; then
+                if [ -z "$PROFILE" ] || [ "$(echo "$PROFILE" | jq -r '.login // empty')" = "" ]; then
                   dialog --msgbox "ERROR: Could not verify credentials.\nCheck the PAT is valid and not expired." 7 54
                   return
                 fi
@@ -472,6 +476,7 @@ jobs:
           │  go [name]    → switch repos (fuzzy / picker)         │
           │  save [msg]   → commit and push current repo          │
           │  noautosave   → exclude this repo from auto-saving    │
+          │  autosave_on  → re-enable auto-saving for this repo   │
           │  secrets      → push secrets to GitHub                │
           │  links        → show SSH / browser access links       │
           │  h [prompt]   → Hermes AI with isolated brain         │
@@ -517,11 +522,11 @@ jobs:
           export HERMES_HOME="$HOME/.hermes/profiles/$REPO_NAME"
           mkdir -p "$HERMES_HOME"
 
-          if [ ! -f "$HERMES_HOME/config.yaml" ] &&[ -f "$HOME/.hermes/config.yaml" ]; then
+          if [ ! -f "$HERMES_HOME/config.yaml" ] && [ -f "$HOME/.hermes/config.yaml" ]; then
             cp "$HOME/.hermes/config.yaml" "$HERMES_HOME/config.yaml"
           fi
 
-          if[ ! -f "$HERMES_HOME/.env" ] && [ -f "$HOME/.hermes/.env" ]; then
+          if [ ! -f "$HERMES_HOME/.env" ] && [ -f "$HOME/.hermes/.env" ]; then
             cp "$HOME/.hermes/.env" "$HERMES_HOME/.env"
           fi
 
@@ -545,7 +550,7 @@ jobs:
           TARGET="${HUB_CURRENT_REPO_OVERRIDE:-$(hub_current_repo)}"
           TARGET="${TARGET:-$(pwd)}"
           MSG="${1:-Cloud session save $(date -u '+%Y-%m-%d %H:%M UTC')}"
-          if[ ! -d "$TARGET/.git" ]; then
+          if [ ! -d "$TARGET/.git" ]; then
             printf '\e[1;33m⚠  No git repo at: %s\e[0m\n' "$TARGET"
             printf '   Use "go <name>" or "cdw" to navigate to a repo first.\n'
             exit 1
@@ -571,7 +576,7 @@ jobs:
             local SNAME SVAL
             SNAME=$(dialog --clear --inputbox "Secret name:" 8 50 3>&1 1>&2 2>&3) || return
             SVAL=$(dialog --clear --passwordbox "Secret value:" 8 50 3>&1 1>&2 2>&3) || return
-            [ -n "$SNAME" ] &&[ -n "$SVAL" ] && hub_push_secret "$SNAME" "$SVAL"
+            [ -n "$SNAME" ] && [ -n "$SVAL" ] && hub_push_secret "$SNAME" "$SVAL"
           }
           while true; do
             CHOICE=$(dialog --clear --title "🔐 Secret Manager" \
@@ -631,7 +636,7 @@ jobs:
               while IFS= read -r d; do
                 [ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "→ $d")
               done < <(find "$WORKDIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
-              if[ ${#OPTS[@]} -eq 0 ]; then
+              if [ ${#OPTS[@]} -eq 0 ]; then
                 printf 'No local repos found. Clone one via hub (option 1).\n'
                 return 1
               fi
@@ -651,7 +656,8 @@ jobs:
           }
 
           autosave_on() {
-            local REPO="$(hub_current_repo)"[ -z "$REPO" ] && echo "Not in a workspace!" && return 1
+            local REPO="$(hub_current_repo)"
+            [ -z "$REPO" ] && echo "Not in a workspace!" && return 1
             rm -f "$REPO/.noautosave"
             echo "✅ Auto-save enabled for $(basename "$REPO")."
           }
@@ -801,7 +807,7 @@ jobs:
           TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
           TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
 
-          if[ "$TMATE_SSH" = "unavailable" ]; then
+          if [ "$TMATE_SSH" = "unavailable" ]; then
             echo "⚠️  tmate session not ready — retrying in 5s..."
             sleep 5
             TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
@@ -860,7 +866,7 @@ jobs:
           while true; do
             CLIENTS=$(tmate -S /tmp/tmate.sock list-clients 2>/dev/null | wc -l)
             if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
-              if[ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
+              if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
                 echo "[$(date -u '+%H:%M:%S')] 🟢 USER JOINED  — active: $CLIENTS"
               else
                 echo "[$(date -u '+%H:%M:%S')] 🔴 USER LEFT   — active: $CLIENTS"
@@ -868,7 +874,7 @@ jobs:
               LAST_CLIENTS="$CLIENTS"
               TIMER=0
             fi
-            if[ "$TIMER" -ge 900 ]; then
+            if [ "$TIMER" -ge 900 ]; then
               echo "[$(date -u '+%H:%M:%S')] 🕒 15min — SSH: $TMATE_SSH"
               echo "                               WEB: ${CF_URL:-check cf.log}"
               TIMER=0
@@ -882,7 +888,8 @@ jobs:
         run: |
           source /usr/local/lib/hubos/lib.sh 2>/dev/null || true
           echo "════ Auto-Save Triggered ════"
-          for user_dir in "$WORKSPACES"/*/; do[ -d "$user_dir" ] || continue
+          for user_dir in "$WORKSPACES"/*/; do
+            [ -d "$user_dir" ] || continue
             USER="$(basename "$user_dir")"
             for repo_dir in "$user_dir"*/; do
               [ -d "$repo_dir/.git" ] || continue

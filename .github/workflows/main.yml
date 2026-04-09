@@ -12,7 +12,7 @@ on:
 jobs:
   cloud-os:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 370
 
     permissions:
       contents: read
@@ -187,7 +187,7 @@ jobs:
           CFGEOF
             printf 'OPENAI_API_KEY=sk-qwen-proxy-local\n' > "$profile_dir/.env"
           }
-          
+
           hub_push_secret() {
             local sname="$1" sval="$2" pat="${3:-$(hub_user_pat)}" repo
             repo="$(hub_github_repo)"
@@ -386,7 +386,7 @@ jobs:
             printf '|  Connected: %-38s |\n' "$SHORT"
             printf '|  Path:      %-38s |\n' "$REPO_DIR"
             printf '+------------------------------------------------------+\n'
-            printf '|  h             -> Hermes AI (model picker + brain)  |\n'
+            printf '|  h             -> Hermes AI (runs in this dir)      |\n'
             printf '|  cdw           -> jump to this repo root            |\n'
             printf '|  go [name]     -> switch to another repo            |\n'
             printf '|  save [msg]    -> git add + commit + push           |\n'
@@ -516,7 +516,7 @@ jobs:
                 clear
                 cat << 'SHELLTIP'
           +----------------------------------------------------------------+
-          |  h             -> Hermes AI (model picker, isolated brain)    |
+          |  h             -> Hermes AI (runs in your current directory)  |
           |  cdw           -> cd to current repo root                     |
           |  go [name]     -> switch repos (fuzzy or picker)              |
           |  save [msg]    -> commit and push current repo                |
@@ -524,11 +524,18 @@ jobs:
           |  links         -> show SSH / browser access links             |
           |  hub           -> back to main menu                           |
           |                                                                |
-          |  Tmux (when SSH-ed via tmate):                                 |
+          |  Tmux keys:                                                    |
           |  Ctrl+B c      new window                                     |
           |  Ctrl+B n/p    next / previous window                         |
           |  Ctrl+B 1-9    jump to window number                          |
           |  Ctrl+B d      detach -- session stays alive!                 |
+          |                                                                |
+          |  Scroll (Termux / SSH):                                        |
+          |  Ctrl+B [      enter copy/scroll mode                         |
+          |  Arrow keys    scroll line by line                            |
+          |  PgUp / PgDn   scroll page by page                           |
+          |  q             exit scroll mode                               |
+          |  Mouse drag    scroll if mouse is on (two-finger in Termux)  |
           +----------------------------------------------------------------+
           SHELLTIP
                 break
@@ -549,39 +556,36 @@ jobs:
           #!/bin/bash
           source /usr/local/lib/hubos/lib.sh
           export PATH="$HOME/.local/bin:/opt/hermes-agent/venv/bin:$PATH"
-          if [ -z "$HERMES_NO_CLEAR" ]; then
-            clear
-          fi
-          REPO_NAME=$(basename "$PWD")
+
+          WORK_DIR="$PWD"
+          REPO_NAME=$(basename "$WORK_DIR")
+
           BLOCKED="workspace workspaces runner home tmp"
           for _b in $BLOCKED; do
             if [ "$REPO_NAME" = "$_b" ]; then
               printf 'ERROR: cd into a repository before launching Hermes.\n'
-              printf 'Current: %s\n' "$PWD"
+              printf 'Current: %s\n' "$WORK_DIR"
               printf 'Use: go <n>  or  cdw\n'
               exit 1
             fi
           done
-          HERMES_PROFILE="$HOME/.hermes/profiles/$REPO_NAME"
-          mkdir -p "$HERMES_PROFILE"
-          export HERMES_HOME="$HERMES_PROFILE"
+
           if ! hub_proxy_alive; then
             printf 'WARNING: Qwen proxy is not responding at %s\n' "$PROXY_URL"
             printf 'Hermes will still launch, but API calls may fail.\n'
           fi
-          if [ ! -f "$HERMES_PROFILE/config.yaml" ]; then
-            if [ -f "$HOME/.hermes/config.yaml" ]; then
-              cp "$HOME/.hermes/config.yaml" "$HERMES_PROFILE/"
-              cp "$HOME/.hermes/.env" "$HERMES_PROFILE/" 2>/dev/null || true
-            fi
-          fi
-          clear
+
+          hub_write_hermes_config "$HOME/.hermes"
+
+          export OPENAI_API_KEY="sk-qwen-proxy-local"
+          export OPENAI_BASE_URL="$PROXY_URL/v1"
+
           printf 'Hermes  |  repo: [%s]\n' "$REPO_NAME"
-          printf 'model:  custom/coder-model\n'
+          printf 'cwd:    %s\n' "$WORK_DIR"
           printf 'proxy:  %s/v1\n' "$PROXY_URL"
-          printf 'brain:  %s\n' "$HERMES_PROFILE"
           printf '/exit or Ctrl+D to return to shell\n\n'
-          exec hermes "$@"
+
+          cd "$WORK_DIR" && exec hermes "$@"
           HEOF
           sudo chmod +x /usr/local/bin/h
 
@@ -684,7 +688,8 @@ jobs:
                 return 1
               fi
             else
-              while IFS= read -r d; do [ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "-> $d")
+              while IFS= read -r d; do
+                [ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "-> $d")
               done < <(find "$WORKDIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
               if [ ${#OPTS[@]} -eq 0 ]; then
                 printf 'No local repos found. Clone one via hub (option 1).\n'
@@ -708,43 +713,16 @@ jobs:
           hub_set_user "${{ github.actor }}"
           printf '%s' '${{ github.repository }}' > "$HUB_CONF/github_repo"
 
-      - name: Setup Qwen Proxy Credentials (Both Accounts)
+      - name: Setup Qwen Proxy Credentials
         run: |
           mkdir -p ~/.qwen
-          # Account 1: CACHE_BLOB
-          printf '%s' '${{ secrets.CACHE_BLOB }}' > ~/.qwen/oauth_creds_acc1.json
-          # Account 2: CACHE_BLOB_2
+          printf '%s' '${{ secrets.CACHE_BLOB }}'   > ~/.qwen/oauth_creds_acc1.json
           printf '%s' '${{ secrets.CACHE_BLOB_2 }}' > ~/.qwen/oauth_creds_acc2.json
-          # Verify both files exist
-          ls -la ~/.qwen/oauth_creds_*.json
 
-      - name: Configure Hermes Brain (Global + Profile Sync)
+      - name: Configure Hermes Brain
         run: |
           source /usr/local/lib/hubos/lib.sh
-          # Write to GLOBAL location
           hub_write_hermes_config "$HOME/.hermes"
-          # ALSO write to PROFILE location for this repo
-          PROFILE_DIR="$HOME/.hermes/profiles/${{ github.repository }}"
-          mkdir -p "$PROFILE_DIR"
-          hub_write_hermes_config "$PROFILE_DIR"
-          # Ensure API key is set in both locations
-          printf 'OPENAI_API_KEY=sk-qwen-proxy-local\n' >> "$HOME/.hermes/.env"
-          printf 'OPENAI_API_KEY=sk-qwen-proxy-local\n' >> "$PROFILE_DIR/.env" 2>/dev/null || true
-
-      - name: Verify Qwen Proxy Setup
-        run: |
-          echo "=== Proxy Health ==="
-          curl -sf http://localhost:8080/v1/models | jq '.data[].id' || echo "Proxy not responding"
-          echo ""
-          echo "=== Loaded Accounts ==="
-          qwen-proxy auth list 2>/dev/null || echo "Could not list accounts"
-          echo ""
-          echo "=== Hermes Config (Global) ==="
-          cat ~/.hermes/config.yaml 2>/dev/null | grep -E "provider|base_url|default|context" || echo "Config not found"
-          echo ""
-          echo "=== Hermes Config (Profile) ==="
-          PROFILE_DIR="$HOME/.hermes/profiles/${{ github.repository }}"
-          cat "$PROFILE_DIR/config.yaml" 2>/dev/null | grep -E "provider|base_url|default|context" || echo "Profile config not found"
 
       - name: Configure Tmux Appearance
         run: |
@@ -766,6 +744,7 @@ jobs:
           set -g escape-time 10
           set -g renumber-windows on
           set -g allow-rename off
+          bind -n WheelUpPane if-shell -F -t = "#{mouse_any_flag}" "send-keys -M" "copy-mode -e"
           bind r source-file ~/.tmux.conf \; display "Config reloaded"
           bind H run-shell "hub"
           bind S run-shell "save"
@@ -799,58 +778,76 @@ jobs:
           if $PROXY_OK; then
             echo ""
             echo "Qwen proxy responding at http://localhost:8080/v1"
+            echo "Available models:"
+            curl -sf http://localhost:8080/v1/models \
+              | jq -r '.data[].id' 2>/dev/null | sed 's/^/  - /' \
+              || echo "  (could not parse model list)"
           else
             echo ""
             echo "WARNING: Qwen proxy did not respond after 6 attempts."
           fi
-          echo "Tailing proxy log to GitHub Actions stdout:"
           tail -n +1 -f ~/proxy.log &
 
       - name: Launch tmate, ttyd, Cloudflare and Hub OS
         env:
           SESSION_LABEL: ${{ inputs.label || 'Cloud Hub OS' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          HERMES_NO_CLEAR: "1"
-          HERMES_DEBUG: "1"
         run: |
           ACTOR="${{ github.actor }}"
           REPO="${{ github.repository }}"
           SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
+          SESSION_START=$(date +%s)
+          SHUTDOWN_FLAG="/tmp/hub_shutdown"
+
           source /usr/local/lib/hubos/lib.sh
+
+          log() {
+            local level="$1"
+            shift
+            printf '[%s] [%-8s] %s\n' "$(date -u '+%H:%M:%S')" "$level" "$*"
+          }
+
           cat >> ~/.bashrc << ENVEOF
           export SESSION_LABEL="$SESSION_LABEL"
           export GITHUB_REPOSITORY="$REPO"
-          export HERMES_NO_CLEAR=1
-          export HERMES_DEBUG=1
           ENVEOF
+
           mkdir -p ~/.ssh
           curl -sf "https://github.com/$ACTOR.keys" >> ~/.ssh/authorized_keys 2>/dev/null || true
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/authorized_keys
+
           tmux new-session -d -s "$TMUX_SESSION" -n "monitor" -x 220 -y 50
           tmux new-window -t "$TMUX_SESSION" -n "u-$ACTOR"
           sleep 1
           tmux send-keys -t "$TMUX_SESSION:u-$ACTOR" \
-            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO' HERMES_NO_CLEAR=1 HERMES_DEBUG=1; source ~/.bashrc; clear; hub" \
+            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; hub" \
             Enter
           tmux select-window -t "$TMUX_SESSION:monitor"
-          tmate -S /tmp/tmate.sock new-session -d -s "tmate-bridge" 2>/dev/null || true
-          tmate -S /tmp/tmate.sock wait tmate-ready 2>/dev/null || true
-          sleep 3
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
-          if [ "$TMATE_SSH" = "unavailable" ]; then
-            echo "tmate not ready yet -- retrying..."
-            sleep 6
-            TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
-            TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
-          fi
-          tmate -S /tmp/tmate.sock send-keys -t "tmate-bridge" \
-            "while true; do tmux attach-session -t $TMUX_SESSION 2>/dev/null; sleep 1; done" \
-            Enter 2>/dev/null || true
-          while ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
-            sleep 1
-          done
+
+          _start_tmate() {
+            tmate -S /tmp/tmate.sock new-session -d -s "tmate-bridge" 2>/dev/null || true
+            tmate -S /tmp/tmate.sock wait tmate-ready 2>/dev/null || true
+            sleep 3
+            local ssh web
+            ssh=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "")
+            web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "")
+            if [ -z "$ssh" ]; then
+              sleep 5
+              ssh=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
+              web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
+            fi
+            printf '%s' "$ssh" > "$HUB_CONF/tmate_ssh"
+            printf '%s' "$web" > "$HUB_CONF/tmate_web"
+            tmate -S /tmp/tmate.sock send-keys -t "tmate-bridge" \
+              "while true; do tmux attach-session -t $TMUX_SESSION 2>/dev/null; sleep 1; done" \
+              Enter 2>/dev/null || true
+            echo "$ssh"
+          }
+
+          TMATE_SSH=$(_start_tmate)
+          TMATE_WEB=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "unavailable")
+
           ttyd \
             --writable \
             --port 7681 \
@@ -858,57 +855,95 @@ jobs:
             bash -c "source ~/.bashrc; tmux attach-session -t $TMUX_SESSION" \
             > ~/ttyd.log 2>&1 &
           sleep 3
+
           cloudflared tunnel --url http://localhost:7681 \
             --no-autoupdate > ~/cf.log 2>&1 &
+
           CF_URL=""
           for i in $(seq 1 30); do
             CF_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' ~/cf.log | head -n1)
-            if [ -n "$CF_URL" ]; then
-              break
-            fi
+            [ -n "$CF_URL" ] && break
             sleep 1
           done
-          printf '%s' "$TMATE_SSH" > "$HUB_CONF/tmate_ssh"
-          printf '%s' "$TMATE_WEB" > "$HUB_CONF/tmate_web"
+
           printf '%s' "${CF_URL:-unavailable}" > "$HUB_CONF/cf_web"
+
+          log "START" "Session: $SESSION_LABEL | Actor: $ACTOR | Repo: $REPO"
+          log "START" "Job timeout: 370min | Graceful shutdown at: 355min"
+          log "LINK" "SSH  : $TMATE_SSH"
+          log "LINK" "WEB  : $TMATE_WEB"
+          log "LINK" "TTYD : ${CF_URL:-check cf.log}"
+          log "INFO" "Termux: pkg install openssh && $TMATE_SSH"
+          log "INFO" "Tmux: Ctrl+B [ = scroll mode | q = exit scroll | Ctrl+B d = detach"
           echo ""
-          echo "========================================================================"
-          echo "  Cloud Hub OS  --  $SESSION_LABEL"
-          echo "  Actor: $ACTOR  |  Repo: $REPO"
-          echo "========================================================================"
-          echo "  SSH -- works from Termux, iOS, Mac, Linux, Windows, no extra tools:"
-          echo "  $TMATE_SSH"
-          echo ""
-          echo "  Browser (tmate web terminal):"
-          echo "  $TMATE_WEB"
-          echo ""
-          echo "  Browser (ttyd via Cloudflare -- full interactive terminal):"
-          echo "  ${CF_URL:-still connecting -- check cf.log}"
-          echo "------------------------------------------------------------------------"
-          echo "  Termux one-liner:  pkg install openssh && $TMATE_SSH"
-          echo "  Tmux: Ctrl+B c=new  n=next  p=prev  [1-9]=jump  d=detach"
-          echo "========================================================================"
-          echo ""
+
+          (
+            sleep 21300
+            touch "$SHUTDOWN_FLAG"
+          ) &
+          TIMER_PID=$!
+
+          (
+            sleep 60
+            while true; do
+              if [ -f "$SHUTDOWN_FLAG" ]; then
+                break
+              fi
+              if ! tmate -S /tmp/tmate.sock ls >/dev/null 2>&1; then
+                log "TMATE" "Socket lost -- restarting tmate..."
+                rm -f /tmp/tmate.sock
+                NEW_SSH=$(_start_tmate)
+                NEW_WEB=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "unavailable")
+                log "TMATE" "Reconnected. SSH : $NEW_SSH"
+                log "TMATE" "Reconnected. WEB : $NEW_WEB"
+                TMATE_SSH="$NEW_SSH"
+                TMATE_WEB="$NEW_WEB"
+              fi
+              sleep 60
+            done
+          ) &
+          WATCHER_PID=$!
+
           LAST_CLIENTS=0
           TIMER=0
+
           while true; do
+            if [ -f "$SHUTDOWN_FLAG" ]; then
+              log "SHUTDOWN" "355min reached -- initiating graceful shutdown"
+              log "SHUTDOWN" "SSH : $TMATE_SSH"
+              log "SHUTDOWN" "WEB : ${CF_URL:-check cf.log}"
+              kill $WATCHER_PID 2>/dev/null
+              break
+            fi
+
             CLIENTS=$(tmate -S /tmp/tmate.sock list-clients 2>/dev/null | wc -l)
+
             if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
               if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
-                echo "[$(date -u '+%H:%M:%S')] USER JOINED  -- active: $CLIENTS"
+                log "JOIN" "User connected | active: $CLIENTS | SSH: $TMATE_SSH"
               else
-                echo "[$(date -u '+%H:%M:%S')] USER LEFT   -- active: $CLIENTS"
+                log "LEAVE" "User disconnected | active: $CLIENTS"
               fi
               LAST_CLIENTS="$CLIENTS"
               TIMER=0
             fi
+
             if [ "$TIMER" -ge 900 ]; then
-              echo "[$(date -u '+%H:%M:%S')] 15min heartbeat -- active: $CLIENTS"
+              UPTIME_MIN=$(( ( $(date +%s) - SESSION_START ) / 60 ))
+              PROXY_STATUS="down"
+              hub_proxy_alive && PROXY_STATUS="up"
+              log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | clients: $CLIENTS | proxy: $PROXY_STATUS"
+              log "HEARTBEAT" "SSH: $TMATE_SSH"
+              log "HEARTBEAT" "WEB: ${CF_URL:-check cf.log}"
               TIMER=0
             fi
+
             sleep 5
             TIMER=$((TIMER + 5))
           done
+
+          kill $TIMER_PID 2>/dev/null
+          log "END" "Watchtower exited -- auto-save step will run next"
 
       - name: Auto-Save All Repos on Exit
         if: always()
@@ -918,7 +953,8 @@ jobs:
           for user_dir in "$WORKSPACES"/*/; do
             [ -d "$user_dir" ] || continue
             USER="$(basename "$user_dir")"
-            for repo_dir in "$user_dir"*/; do [ -d "$repo_dir/.git" ] || continue
+            for repo_dir in "$user_dir"*/; do
+              [ -d "$repo_dir/.git" ] || continue
               hub_save_repo "$repo_dir" \
                 "Auto-save: runner exit $(date -u '+%Y-%m-%d %H:%M UTC')" \
                 "$USER"

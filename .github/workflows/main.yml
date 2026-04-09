@@ -168,14 +168,14 @@ jobs:
           model:
             provider: custom
             base_url: http://localhost:8080/v1
-            default: coder-model
-            context_window: 65536
+            default: qwen3.6-plus
+            context_window: 1000000
             max_input_tokens: 65536
           agent:
-            max_context: 65536
-            compaction_threshold: 60000
-            subagent_context_window: 65536
-            max_iterations: 1000
+            max_context: 1000000
+            compaction_threshold: 999000
+            subagent_context_window: 1000000
+            max_iterations: 10000
           tools:
             timeout: 21600
           api:

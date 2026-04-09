@@ -689,18 +689,13 @@ jobs:
         run: |
           mkdir -p ~/.hermes
           cat > ~/.hermes/config.yaml << 'EOF'
-          model: openai/qwen3.6-plus
-          api_mode: openai
-          max_iterations: 1000
-          display:
-            skin: default
-            verbose: true
-          openai:
-            base_url: http://localhost:8080/v1
-            api_key: dummy
-          model_settings:
+          model:
+            default: openai/qwen3.6-plus
+            api_mode: openai
             context_window: 1000000
             max_input_tokens: 1000000
+            provider: custom
+            base_url: http://localhost:8080/v1
           agent:
             max_context: 1000000
             compaction_threshold: 995000
@@ -710,6 +705,9 @@ jobs:
             timeout: 21600
           api:
             timeout: 21600
+          display:
+            skin: default
+            verbose: true
           EOF
           cat > ~/.hermes/.env << 'EOF'
           OPENAI_API_KEY=dummy

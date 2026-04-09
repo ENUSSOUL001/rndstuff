@@ -169,13 +169,14 @@ jobs:
             provider: custom
             base_url: http://localhost:8080/v1
             default: qwen3.6-plus
-            context_window: 1000000
-            max_input_tokens: 65536
+            context_length: 1048576
+          compression:
+            enabled: true
+            threshold: 0.95
+            target_ratio: 0.20
+            protect_last_n: 50
           agent:
-            max_context: 1000000
-            compaction_threshold: 999000
-            subagent_context_window: 1000000
-            max_iterations: 10000
+            max_turns: 10000
           tools:
             timeout: 21600
           api:
@@ -186,7 +187,7 @@ jobs:
           CFGEOF
             printf 'OPENAI_API_KEY=sk-qwen-proxy-local\n' > "$profile_dir/.env"
           }
-
+          
           hub_push_secret() {
             local sname="$1" sval="$2" pat="${3:-$(hub_user_pat)}" repo
             repo="$(hub_github_repo)"

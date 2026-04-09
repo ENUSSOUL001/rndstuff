@@ -506,6 +506,9 @@ jobs:
           sudo tee /usr/local/bin/h > /dev/null << 'HEOF'
           #!/bin/bash
           export PATH="$HOME/.local/bin:/opt/hermes-agent/venv/bin:$PATH"
+          export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+          export OPENAI_BASE_URL="http://localhost:8080/v1"
+          export OPENAI_API_KEY="dummy"
 
           REPO_NAME=$(basename "$PWD")
           DISALLOWED="workspace workspaces runner home"
@@ -519,22 +522,23 @@ jobs:
             fi
           done
 
-          export HERMES_HOME="$HOME/.hermes/profiles/$REPO_NAME"
-          mkdir -p "$HERMES_HOME"
+          PROFILE_DIR="$HERMES_HOME/profiles/$REPO_NAME"
+          mkdir -p "$PROFILE_DIR"
 
-          if [ ! -f "$HERMES_HOME/config.yaml" ] && [ -f "$HOME/.hermes/config.yaml" ]; then
-            cp "$HOME/.hermes/config.yaml" "$HERMES_HOME/config.yaml"
+          if [ ! -f "$PROFILE_DIR/config.yaml" ] && [ -f "$HERMES_HOME/config.yaml" ]; then
+            cp "$HERMES_HOME/config.yaml" "$PROFILE_DIR/config.yaml"
           fi
 
-          if [ ! -f "$HERMES_HOME/.env" ] && [ -f "$HOME/.hermes/.env" ]; then
-            cp "$HOME/.hermes/.env" "$HERMES_HOME/.env"
+          if [ ! -f "$PROFILE_DIR/.env" ] && [ -f "$HERMES_HOME/.env" ]; then
+            cp "$HERMES_HOME/.env" "$PROFILE_DIR/.env"
           fi
 
           printf '\e[1;36m'
           printf '┌──────────────────────────────────────────────┐\n'
           printf '│  🧠 Hermes — isolated brain: [%s]\n' "$REPO_NAME"
-          printf '│  Profile: %s\n' "$HERMES_HOME"
+          printf '│  Profile: %s\n' "$PROFILE_DIR"
           printf '│  Model:   qwen3.6-plus via Qwen Proxy        │\n'
+          printf '│  Context: 1M tokens | Output: 65K | Timeout: 6h\n'
           printf '└──────────────────────────────────────────────┘\n'
           printf '\e[0m\n'
 
@@ -692,14 +696,17 @@ jobs:
             timeout: 21600
           api:
             timeout: 21600
+            max_retries: 3
           display:
             skin: default
             verbose: true
+            tool_progress_command: true
           EOF
 
           cat > ~/.hermes/.env << 'EOF'
           OPENAI_API_KEY=dummy
           OPENAI_BASE_URL=http://localhost:8080/v1
+          HERMES_SUPPRESS_PROVIDER_WARNING=true
           EOF
 
       - name: Configure Tmux Appearance

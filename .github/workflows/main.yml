@@ -505,10 +505,14 @@ jobs:
         run: |
           sudo tee /usr/local/bin/h > /dev/null << 'HEOF'
           #!/bin/bash
-          export PATH="$HOME/.local/bin:/opt/hermes-agent/venv/bin:$PATH"
-          export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-          export OPENAI_BASE_URL="http://localhost:8080/v1"
+          # Force Hermes to use qwen-proxy via OpenAI-compatible API
           export OPENAI_API_KEY="dummy"
+          export OPENAI_BASE_URL="http://localhost:8080/v1"
+          export HERMES_SUPPRESS_PROVIDER_WARNING="true"
+          export PATH="$HOME/.local/bin:/opt/hermes-agent/venv/bin:$PATH"
+          
+          # Source bashrc to pick up any additional exports
+          [ -f ~/.bashrc ] && source ~/.bashrc
 
           REPO_NAME=$(basename "$PWD")
           DISALLOWED="workspace workspaces runner home"
@@ -522,22 +526,36 @@ jobs:
             fi
           done
 
-          PROFILE_DIR="$HERMES_HOME/profiles/$REPO_NAME"
+          PROFILE_DIR="$HOME/.hermes/profiles/$REPO_NAME"
           mkdir -p "$PROFILE_DIR"
 
-          if [ ! -f "$PROFILE_DIR/config.yaml" ] && [ -f "$HERMES_HOME/config.yaml" ]; then
-            cp "$HERMES_HOME/config.yaml" "$PROFILE_DIR/config.yaml"
-          fi
-
-          if [ ! -f "$PROFILE_DIR/.env" ] && [ -f "$HERMES_HOME/.env" ]; then
-            cp "$HERMES_HOME/.env" "$PROFILE_DIR/.env"
+          # Ensure profile config exists with correct model/provider
+          if [ ! -f "$PROFILE_DIR/config.yaml" ]; then
+            cat > "$PROFILE_DIR/config.yaml" << 'PROFCONF'
+model: openai/coder-model
+agent:
+  max_iterations: 1000
+  max_context: 1000000
+  compaction_threshold: 995000
+  subagent_context_window: 1000000
+tools:
+  timeout: 21600
+api:
+  timeout: 21600
+  max_retries: 3
+display:
+  skin: default
+  verbose: true
+  tool_progress_command: true
+PROFCONF
           fi
 
           printf '\e[1;36m'
           printf '┌──────────────────────────────────────────────┐\n'
           printf '│  🧠 Hermes — isolated brain: [%s]\n' "$REPO_NAME"
           printf '│  Profile: %s\n' "$PROFILE_DIR"
-          printf '│  Model:   qwen3.6-plus via Qwen Proxy        │\n'
+          printf '│  Model:   coder-model (qwen3.6-plus)         │\n'
+          printf '│  Provider:openai via qwen-proxy @ :8080      │\n'
           printf '│  Context: 1M tokens | Output: 65K | Timeout: 6h\n'
           printf '└──────────────────────────────────────────────┘\n'
           printf '\e[0m\n'
@@ -614,6 +632,11 @@ jobs:
           export TERM="${TERM:-xterm-256color}"
           source /usr/local/lib/hubos/lib.sh 2>/dev/null
 
+          # Hermes + qwen-proxy integration
+          export OPENAI_API_KEY="dummy"
+          export OPENAI_BASE_URL="http://localhost:8080/v1"
+          export HERMES_SUPPRESS_PROVIDER_WARNING="true"
+
           cdw() {
             local REPO
             REPO="$(hub_current_repo)"
@@ -684,30 +707,38 @@ jobs:
 
       - name: Configure Global Hermes Brain
         run: |
-          mkdir -p ~/.hermes
+          mkdir -p ~/.hermes ~/.hermes/profiles
+          
+          # Global config for Hermes
           cat > ~/.hermes/config.yaml << 'EOF'
-          model: openai/qwen3.6-plus
-          agent:
-            max_iterations: 1000
-            max_context: 1000000
-            compaction_threshold: 995000
-            subagent_context_window: 1000000
-          tools:
-            timeout: 21600
-          api:
-            timeout: 21600
-            max_retries: 3
-          display:
-            skin: default
-            verbose: true
-            tool_progress_command: true
-          EOF
+model: openai/coder-model
+agent:
+  max_iterations: 1000
+  max_context: 1000000
+  compaction_threshold: 995000
+  subagent_context_window: 1000000
+tools:
+  timeout: 21600
+api:
+  timeout: 21600
+  max_retries: 3
+display:
+  skin: default
+  verbose: true
+  tool_progress_command: true
+EOF
 
+          # Global .env for Hermes (provider credentials)
           cat > ~/.hermes/.env << 'EOF'
-          OPENAI_API_KEY=dummy
-          OPENAI_BASE_URL=http://localhost:8080/v1
-          HERMES_SUPPRESS_PROVIDER_WARNING=true
-          EOF
+OPENAI_API_KEY=dummy
+OPENAI_BASE_URL=http://localhost:8080/v1
+HERMES_SUPPRESS_PROVIDER_WARNING=true
+EOF
+
+          # Also create default profile config
+          mkdir -p ~/.hermes/profiles/default
+          cp ~/.hermes/config.yaml ~/.hermes/profiles/default/config.yaml
+          cp ~/.hermes/.env ~/.hermes/profiles/default/.env
 
       - name: Configure Tmux Appearance
         run: |
@@ -777,6 +808,43 @@ jobs:
             echo "   Hermes AI (h command) may not work this session."
             echo "   Check the proxy log above for errors."
           fi
+
+      - name: Verify Hermes Configuration
+        run: |
+          # Test that Hermes can see the configured provider/model
+          source ~/.bashrc
+          export OPENAI_API_KEY="dummy"
+          export OPENAI_BASE_URL="http://localhost:8080/v1"
+          
+          echo "════ Hermes Config Check ════"
+          echo "Checking Hermes config..."
+          
+          # Try to get model list from Hermes (should show coder-model via openai provider)
+          if command -v hermes >/dev/null 2>&1; then
+            echo "Hermes binary found at: $(which hermes)"
+            echo "Hermes version: $(hermes --version 2>/dev/null || echo 'unknown')"
+            
+            # Test a simple config read
+            echo "Config file location: ~/.hermes/config.yaml"
+            if [ -f ~/.hermes/config.yaml ]; then
+              echo "Config contents:"
+              cat ~/.hermes/config.yaml
+            fi
+            
+            echo ".env file location: ~/.hermes/.env"
+            if [ -f ~/.hermes/.env ]; then
+              echo ".env contents:"
+              cat ~/.hermes/.env
+            fi
+            
+            # Quick test: try to run hermes with --help to verify it starts
+            echo ""
+            echo "Testing hermes --help..."
+            hermes --help 2>&1 | head -20 || echo "Note: hermes help may require auth"
+          else
+            echo "⚠️  hermes command not found in PATH"
+          fi
+          echo "════════════════════════════"
 
       - name: Launch tmate, ttyd, Cloudflare Tunnel & Hub OS
         env:

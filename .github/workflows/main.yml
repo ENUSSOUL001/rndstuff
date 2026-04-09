@@ -43,29 +43,43 @@ jobs:
           echo "$NPM_BIN" >> $GITHUB_PATH
           echo "export PATH=\"$NPM_BIN:\$PATH\"" >> ~/.bashrc
           echo "export PATH=\"$NPM_BIN:\$PATH\"" >> ~/.profile
-          echo "export PATH=\"$NPM_BIN:\$PATH\"" | sudo tee -a /etc/environment
 
       - name: Install System Packages
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang tmux dialog jq python3-pip libsodium-dev git curl openssh-server cloudflared procps
+          sudo apt-get install -y -qq \
+            clang \
+            tmux \
+            dialog \
+            jq \
+            python3-pip \
+            libsodium-dev \
+            git \
+            curl \
+            openssh-server \
+            procps
           pip install PyNaCl --break-system-packages -q
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+            -o /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb
 
       - name: Install Qwen Proxy
         run: |
           npm install -g qwen-proxy --silent --no-fund --no-audit
-          if ! command -v qwen-proxy &> /dev/null; then exit 1; fi
+          if ! command -v qwen-proxy &>/dev/null; then exit 1; fi
 
       - name: Install Hermes Agent via UV
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
+          echo "export PATH=\"$HOME/.local/bin:\$PATH\"" >> ~/.bashrc
           git clone https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent
           cd /opt/hermes-agent
           uv venv venv --python 3.11
           source venv/bin/activate
           uv pip install -e ".[all]" -q
-          sudo ln -s /opt/hermes-agent/venv/bin/hermes /usr/local/bin/hermes
+          sudo ln -sf /opt/hermes-agent/venv/bin/hermes /usr/local/bin/hermes
+          echo "export PATH=\"/opt/hermes-agent/venv/bin:\$PATH\"" >> ~/.bashrc
 
       - name: Build Secret Encryption Helper
         run: |
@@ -95,54 +109,92 @@ jobs:
           export USERS_DIR="$HUB_DIR/users"
           export WORKSPACES="$HOME/workspaces"
           export HUB_CONF="$HUB_DIR/config"
-          export TMUX_SOCK="/tmp/cloud-os.sock"
+          export TMUX_SESSION="cloud"
           export SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
           mkdir -p "$USERS_DIR" "$WORKSPACES" "$HUB_CONF"
+
           hub_active_user() {
-            cat "$HUB_CONF/active_user" 2>/dev/null || ls -1t "$USERS_DIR" 2>/dev/null | head -n1 || echo "default"
+            cat "$HUB_CONF/active_user" 2>/dev/null \
+              || ls -1t "$USERS_DIR" 2>/dev/null | head -n1 \
+              || echo "default"
           }
+
           hub_set_user() {
             echo "$1" > "$HUB_CONF/active_user"
           }
+
           hub_user_pat() {
             local u="${1:-$(hub_active_user)}"
             cat "$USERS_DIR/$u/pat" 2>/dev/null
           }
+
           hub_user_email() {
             local u="${1:-$(hub_active_user)}"
             cat "$USERS_DIR/$u/email" 2>/dev/null || echo "${u}@cloud.local"
           }
+
           hub_current_repo() {
             cat "$HUB_CONF/current_repo" 2>/dev/null
           }
+
           hub_set_repo() {
             echo "$1" > "$HUB_CONF/current_repo"
           }
+
           hub_github_repo() {
             echo "${GITHUB_REPOSITORY:-$(cat "$HUB_CONF/github_repo" 2>/dev/null)}"
           }
+
           hub_push_secret() {
             local sname="$1"
             local sval="$2"
             local pat="${3:-$(hub_user_pat)}"
-            local repo="$(hub_github_repo)"
-            if [ -z "$pat" ]; then dialog --msgbox "ERROR: No PAT found for current user." 7 52; return 1; fi
-            if [ -z "$repo" ]; then dialog --msgbox "ERROR: GitHub repo not set." 7 52; return 1; fi
-            if [ -z "$sname" ] || [ -z "$sval" ]; then dialog --msgbox "ERROR: Secret name/value empty." 5 45; return 1; fi
-            local pk_json=$(curl -sf -H "Authorization: Bearer $pat" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$repo/actions/secrets/public-key" 2>/dev/null)
-            if [ -z "$pk_json" ] ||[ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then dialog --msgbox "ERROR: Could not fetch repo public key." 7 55; return 1; fi
-            local key_id=$(echo "$pk_json" | jq -r '.key_id')
-            local key_val=$(echo "$pk_json" | jq -r '.key')
-            local encrypted=$(python3 /usr/local/bin/hub_encrypt.py "$key_val" "$sval" 2>/dev/null)
-            if [ -z "$encrypted" ]; then dialog --msgbox "ERROR: Encryption failed." 7 55; return 1; fi
-            local http_code=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer $pat" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$repo/actions/secrets/$sname" -d "{\"encrypted_value\":\"$encrypted\",\"key_id\":\"$key_id\"}" 2>/dev/null) || true
+            local repo
+            repo="$(hub_github_repo)"
+            if [ -z "$pat" ]; then
+              dialog --msgbox "ERROR: No PAT found for current user." 7 52
+              return 1
+            fi
+            if [ -z "$repo" ]; then
+              dialog --msgbox "ERROR: GitHub repo not set." 7 52
+              return 1
+            fi
+            if [ -z "$sname" ] || [ -z "$sval" ]; then
+              dialog --msgbox "ERROR: Secret name/value empty." 5 45
+              return 1
+            fi
+            local pk_json
+            pk_json=$(curl -sf \
+              -H "Authorization: Bearer $pat" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$repo/actions/secrets/public-key" 2>/dev/null)
+            if [ -z "$pk_json" ] || [ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
+              dialog --msgbox "ERROR: Could not fetch repo public key." 7 55
+              return 1
+            fi
+            local key_id key_val encrypted http_code
+            key_id=$(echo "$pk_json" | jq -r '.key_id')
+            key_val=$(echo "$pk_json" | jq -r '.key')
+            encrypted=$(python3 /usr/local/bin/hub_encrypt.py "$key_val" "$sval" 2>/dev/null)
+            if [ -z "$encrypted" ]; then
+              dialog --msgbox "ERROR: Encryption failed." 7 55
+              return 1
+            fi
+            http_code=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
+              -H "Authorization: Bearer $pat" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$repo/actions/secrets/$sname" \
+              -d "{\"encrypted_value\":\"$encrypted\",\"key_id\":\"$key_id\"}" 2>/dev/null) || true
             case "$http_code" in
               201|204) dialog --msgbox "✅ Secret '$sname' saved to GitHub!\nAvailable NEXT run." 9 58 ;;
               401|403) dialog --msgbox "ERROR HTTP $http_code: Permission denied." 7 58 ;;
-              404) dialog --msgbox "ERROR HTTP 404: Repo not found." 7 58 ;;
-              *) dialog --msgbox "ERROR: API returned HTTP $http_code." 6 55 ;;
+              404)     dialog --msgbox "ERROR HTTP 404: Repo not found." 7 58 ;;
+              *)       dialog --msgbox "ERROR: API returned HTTP $http_code." 6 55 ;;
             esac
           }
+
           hub_save_repo() {
             local repo_path="$1"
             local msg="${2:-Cloud session sync $(date -u '+%Y-%m-%d %H:%M UTC')}"
@@ -150,18 +202,27 @@ jobs:
             [ -d "$repo_path/.git" ] || return 1
             (
               cd "$repo_path" || return 1
-              git config user.name "$user"
+              git config user.name  "$user"
               git config user.email "$(hub_user_email "$user")"
               git add -A
-              if git diff-index --quiet HEAD 2>/dev/null; then echo "  ✓ $(basename "$repo_path") — nothing to commit"; else git commit -m "$msg" && git push && echo "  ✅ $(basename "$repo_path") saved"; fi
+              if git diff-index --quiet HEAD 2>/dev/null; then
+                echo "  ✓ $(basename "$repo_path") — nothing to commit"
+              else
+                git commit -m "$msg" && git push && echo "  ✅ $(basename "$repo_path") saved"
+              fi
             ) 2>&1
           }
+
           hub_ensure_window() {
             local user="${1:-$(hub_active_user)}"
             local win_name="u-${user}"
-            if [ -n "$TMUX" ] || tmate -S "$TMUX_SOCK" ls 2>/dev/null | grep -q .; then
-              local sock="${TMUX:-$TMUX_SOCK}"
-              if ! tmate -S "$TMUX_SOCK" list-windows -F '#W' 2>/dev/null | grep -qx "$win_name"; then tmate -S "$TMUX_SOCK" new-window -n "$win_name" 2>/dev/null; fi[ -n "$TMUX" ] && tmux select-window -t "$win_name" 2>/dev/null
+            if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+              if ! tmux list-windows -t "$TMUX_SESSION" -F '#W' 2>/dev/null | grep -qx "$win_name"; then
+                tmux new-window -t "$TMUX_SESSION" -n "$win_name" 2>/dev/null
+              fi
+              if [ -n "$TMUX" ]; then
+                tmux select-window -t "$TMUX_SESSION:$win_name" 2>/dev/null
+              fi
             fi
           }
           LIBEOF
@@ -173,78 +234,152 @@ jobs:
           #!/bin/bash
           source /usr/local/lib/hubos/lib.sh
           CURRENT_USER="$(hub_active_user)"
+
           _menu_secrets() {
             while true; do
-              local REPO="$(hub_github_repo)"
-              local SCHOICE=$(dialog --clear --title "🔐 Secret Manager" --menu "Repo: ${REPO:-not set}  |  Push secrets for future runs" 18 62 6 1 "Save PAT → GH_SYNC_TOKEN" 2 "Save Qwen blob 1 → CACHE_BLOB" 3 "Save Qwen blob 2 → CACHE_BLOB_2" 4 "Push a custom secret..." 5 "ℹ  What is this?" 6 "← Back" 3>&1 1>&2 2>&3) || return
+              local REPO SCHOICE
+              REPO="$(hub_github_repo)"
+              SCHOICE=$(dialog --clear --title "🔐 Secret Manager" \
+                --menu "Repo: ${REPO:-not set}  |  Push secrets for future runs" \
+                18 62 6 \
+                1 "Save PAT → GH_SYNC_TOKEN" \
+                2 "Save Qwen blob 1 → CACHE_BLOB" \
+                3 "Save Qwen blob 2 → CACHE_BLOB_2" \
+                4 "Push a custom secret..." \
+                5 "ℹ  What is this?" \
+                6 "← Back" \
+                3>&1 1>&2 2>&3) || return
               case "$SCHOICE" in
-                1) local v=$(dialog --clear --passwordbox "Paste GitHub PAT (repo scope):" 9 58 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v" ;;
-                2) local v=$(dialog --clear --inputbox "Paste CACHE_BLOB JSON:" 10 62 3>&1 1>&2 2>&3);[ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v" ;;
-                3) local v=$(dialog --clear --inputbox "Paste CACHE_BLOB_2 JSON:" 10 62 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v" ;;
-                4) local sname=$(dialog --clear --inputbox "Secret name:" 8 48 3>&1 1>&2 2>&3); if [ -n "$sname" ]; then local sval=$(dialog --clear --passwordbox "Secret value:" 8 48 3>&1 1>&2 2>&3);[ -n "$sval" ] && hub_push_secret "$sname" "$sval"; fi ;;
-                5) dialog --msgbox "Secrets pushed here are stored on GitHub\nand loaded automatically on the NEXT run." 12 55 ;;
+                1)
+                  local v
+                  v=$(dialog --clear --passwordbox "Paste GitHub PAT (repo scope):" 9 58 3>&1 1>&2 2>&3)
+                  [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v"
+                  ;;
+                2)
+                  local v
+                  v=$(dialog --clear --inputbox "Paste CACHE_BLOB JSON:" 10 62 3>&1 1>&2 2>&3)
+                  [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v"
+                  ;;
+                3)
+                  local v
+                  v=$(dialog --clear --inputbox "Paste CACHE_BLOB_2 JSON:" 10 62 3>&1 1>&2 2>&3)
+                  [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v"
+                  ;;
+                4)
+                  local sname sval
+                  sname=$(dialog --clear --inputbox "Secret name:" 8 48 3>&1 1>&2 2>&3)
+                  if [ -n "$sname" ]; then
+                    sval=$(dialog --clear --passwordbox "Secret value:" 8 48 3>&1 1>&2 2>&3)
+                    [ -n "$sval" ] && hub_push_secret "$sname" "$sval"
+                  fi
+                  ;;
+                5)
+                  dialog --msgbox "Secrets pushed here are stored on GitHub\nand loaded automatically on the NEXT run.\n\nNeeds a classic PAT with repo scope." 10 55
+                  ;;
                 6) return ;;
               esac
             done
           }
+
           _menu_repos() {
-            local PAT="$(hub_user_pat "$CURRENT_USER")"
-            if [ -z "$PAT" ]; then dialog --msgbox "No PAT found for '$CURRENT_USER'." 6 52; return; fi
+            local PAT
+            PAT="$(hub_user_pat "$CURRENT_USER")"
+            if [ -z "$PAT" ]; then
+              dialog --msgbox "No PAT found for '$CURRENT_USER'.\nSwitch/add a user first." 6 52
+              return
+            fi
             dialog --infobox "Fetching repositories..." 4 50
-            local REPOS=$(curl -sf -H "Authorization: token $PAT" -H "Accept: application/vnd.github+json" "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator" | jq -r '.[].full_name' 2>/dev/null)
-            if [ -z "$REPOS" ]; then dialog --msgbox "Failed to fetch repos." 6 52; return; fi
+            local REPOS
+            REPOS=$(curl -sf \
+              -H "Authorization: token $PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator" \
+              | jq -r '.[].full_name' 2>/dev/null)
+            if [ -z "$REPOS" ]; then
+              dialog --msgbox "Failed to fetch repos.\nCheck PAT has repo scope." 6 52
+              return
+            fi
             local OPTS=()
-            while IFS= read -r r; do OPTS+=("$r" "→"); done <<< "$REPOS"
-            local REPO_CHOICE=$(dialog --clear --title "📂 Repositories" --menu "Select to clone / open:" 24 64 16 "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
+            while IFS= read -r r; do
+              OPTS+=("$r" "→")
+            done <<< "$REPOS"
+            local REPO_CHOICE
+            REPO_CHOICE=$(dialog --clear --title "📂 Repositories" \
+              --menu "Select to clone / open:" 24 64 16 \
+              "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
             local SHORT="${REPO_CHOICE##*/}"
             local REPO_DIR="$WORKSPACES/$CURRENT_USER/$SHORT"
             if [ ! -d "$REPO_DIR/.git" ]; then
               dialog --infobox "Cloning $REPO_CHOICE ..." 4 50
-              if ! git clone "https://$CURRENT_USER:$PAT@github.com/$REPO_CHOICE.git" "$REPO_DIR" > /dev/null 2>&1; then dialog --msgbox "Clone failed." 6 50; return; fi
-              git -C "$REPO_DIR" config user.name "$CURRENT_USER"
+              if ! git clone "https://$CURRENT_USER:$PAT@github.com/$REPO_CHOICE.git" \
+                  "$REPO_DIR" >/dev/null 2>&1; then
+                dialog --msgbox "Clone failed for $REPO_CHOICE.\nCheck PAT and repo access." 6 50
+                return
+              fi
+              git -C "$REPO_DIR" config user.name  "$CURRENT_USER"
               git -C "$REPO_DIR" config user.email "$(hub_user_email "$CURRENT_USER")"
             fi
             hub_set_repo "$REPO_DIR"
             clear
             printf '\e[1;32m'
-            cat << BANNER
-          ╔══════════════════════════════════════════════╗
-          ║  ✅ Connected: %-28s ║
-          ║  📁 %-40s ║
-          ╠══════════════════════════════════════════════╣
-          ║  h          → Launch Isolated Hermes Brain  ║
-          ║  cdw        → jump to repo root             ║
-          ║  save       → commit & push                 ║
-          ║  hub        → back to main menu             ║
-          ╚══════════════════════════════════════════════╝
-          BANNER
+            printf '╔══════════════════════════════════════════════╗\n'
+            printf '║  ✅ Connected: %-28s ║\n' "$SHORT"
+            printf '║  📁 %-40s ║\n' "$REPO_DIR"
+            printf '╠══════════════════════════════════════════════╣\n'
+            printf '║  h [prompt]   → Hermes AI (isolated brain)  ║\n'
+            printf '║  cdw          → jump to repo root           ║\n'
+            printf '║  go [name]    → switch to another repo      ║\n'
+            printf '║  save [msg]   → commit & push               ║\n'
+            printf '║  secrets      → manage GitHub secrets       ║\n'
+            printf '║  hub          → back to main menu           ║\n'
+            printf '╚══════════════════════════════════════════════╝\n'
             printf '\e[0m'
             bash --rcfile <(cat ~/.bashrc; echo "cd '$REPO_DIR'")
           }
+
           _menu_users() {
             while true; do
-              local USERS_LIST=$(ls -1 "$USERS_DIR" 2>/dev/null)
-              local OPTS=()
-              while IFS= read -r u; do [ -n "$u" ] && OPTS+=("$u" "switch →"); done <<< "$USERS_LIST"
+              local USERS_LIST OPTS=() U_CHOICE
+              USERS_LIST=$(ls -1 "$USERS_DIR" 2>/dev/null)
+              while IFS= read -r u; do
+                [ -n "$u" ] && OPTS+=("$u" "switch →")
+              done <<< "$USERS_LIST"
               OPTS+=("__add__" "+ Add new user")
-              local U_CHOICE=$(dialog --clear --title "👥 User Profiles" --menu "Active: $CURRENT_USER" 18 52 10 "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
-              if[ "$U_CHOICE" = "__add__" ]; then
-                local NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)
+              U_CHOICE=$(dialog --clear --title "👥 User Profiles" \
+                --menu "Active: $CURRENT_USER" 18 52 10 \
+                "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
+              if [ "$U_CHOICE" = "__add__" ]; then
+                local NEW_USER NEW_PAT NEW_EMAIL PROFILE
+                NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)
                 [ -z "$NEW_USER" ] && return
-                local NEW_PAT=$(dialog --clear --passwordbox "GitHub PAT:" 9 52 3>&1 1>&2 2>&3)
+                NEW_PAT=$(dialog --clear --passwordbox \
+                  "GitHub PAT (needs: repo, workflow scopes):" 9 52 3>&1 1>&2 2>&3)
                 [ -z "$NEW_PAT" ] && return
                 dialog --infobox "Verifying credentials..." 4 45
-                local PROFILE=$(curl -sf -H "Authorization: token $NEW_PAT" https://api.github.com/user 2>/dev/null)
-                if [ -z "$PROFILE" ]; then dialog --msgbox "ERROR: Invalid credentials." 6 50; return; fi
-                local NEW_EMAIL=$(echo "$PROFILE" | jq -r '.email // empty')
-                if [ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then NEW_EMAIL=$(dialog --clear --inputbox "Email not public. Enter email:" 9 52 3>&1 1>&2 2>&3); [ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"; fi
+                PROFILE=$(curl -sf \
+                  -H "Authorization: token $NEW_PAT" \
+                  https://api.github.com/user 2>/dev/null)
+                if [ -z "$PROFILE" ]; then
+                  dialog --msgbox "ERROR: Invalid credentials." 6 50
+                  return
+                fi
+                NEW_EMAIL=$(echo "$PROFILE" | jq -r '.email // empty')
+                if [ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then
+                  NEW_EMAIL=$(dialog --clear --inputbox \
+                    "Email not public. Enter your git email:" 9 52 3>&1 1>&2 2>&3)
+                  [ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"
+                fi
                 mkdir -p "$USERS_DIR/$NEW_USER"
-                echo "$NEW_PAT" > "$USERS_DIR/$NEW_USER/pat"
+                echo "$NEW_PAT"   > "$USERS_DIR/$NEW_USER/pat"
                 echo "$NEW_EMAIL" > "$USERS_DIR/$NEW_USER/email"
                 CURRENT_USER="$NEW_USER"
                 hub_set_user "$CURRENT_USER"
                 hub_ensure_window "$CURRENT_USER"
-                if dialog --yesno "User added! Save PAT as GH_SYNC_TOKEN in Secrets?" 10 55; then hub_push_secret "GH_SYNC_TOKEN" "$NEW_PAT" "$NEW_PAT"; fi
+                if dialog --yesno \
+                  "User '$NEW_USER' added! ✅\n\nSave PAT as GH_SYNC_TOKEN in GitHub Secrets?\n(makes it available on next run)" \
+                  10 55; then
+                  hub_push_secret "GH_SYNC_TOKEN" "$NEW_PAT" "$NEW_PAT"
+                fi
               elif [ -n "$U_CHOICE" ]; then
                 CURRENT_USER="$U_CHOICE"
                 hub_set_user "$CURRENT_USER"
@@ -254,41 +389,69 @@ jobs:
               fi
             done
           }
+
           _save_all() {
             dialog --infobox "Saving all open repositories..." 4 40
             local results=""
-            for repo_dir in "$WORKSPACES/$CURRENT_USER"/*/; do[ -d "$repo_dir/.git" ] || continue
-              local out=$(hub_save_repo "$repo_dir" "Manual cloud save" "$CURRENT_USER")
+            for repo_dir in "$WORKSPACES/$CURRENT_USER"/*/; do
+              [ -d "$repo_dir/.git" ] || continue
+              local out
+              out=$(hub_save_repo "$repo_dir" "Manual cloud save" "$CURRENT_USER")
               results+="$out\n"
             done
             dialog --msgbox "Save complete:\n\n${results:-No repos found.}" 14 55
           }
+
           hub_ensure_window "$CURRENT_USER"
+
           while true; do
             CURRENT_USER="$(hub_active_user)"
-            local CHOICE=$(dialog --clear --title "☁ $SESSION_LABEL" --menu "User: $CURRENT_USER  |  $(date '+%H:%M')" 20 62 7 1 "📂 Select / Clone Repository" 2 "👥 Switch / Add User" 3 "🔐 Manage GitHub Secrets" 4 "💾 Save All Open Repos" 5 "📋 Tmux Window List" 6 "🐚 Drop to Shell" 7 "❌ Exit Hub" 3>&1 1>&2 2>&3)[ $? -ne 0 ] && CHOICE=6
+            CHOICE=$(dialog --clear \
+              --title "☁ $SESSION_LABEL" \
+              --menu "User: $CURRENT_USER  |  $(date '+%H:%M')" \
+              20 62 7 \
+              1 "📂 Select / Clone Repository" \
+              2 "👥 Switch / Add User" \
+              3 "🔐 Manage GitHub Secrets" \
+              4 "💾 Save All Open Repos" \
+              5 "📋 Tmux Window List" \
+              6 "🐚 Drop to Shell" \
+              7 "❌ Exit Hub" \
+              3>&1 1>&2 2>&3)
+            [ $? -ne 0 ] && CHOICE=6
             case "$CHOICE" in
               1) _menu_repos ;;
               2) _menu_users ;;
               3) _menu_secrets ;;
               4) _save_all ;;
-              5) clear; tmate -S "$TMUX_SOCK" list-windows 2>/dev/null || tmux list-windows 2>/dev/null; read -rp "Press Enter to return..." _dummy ;;
-              6) clear; echo "Dropped to shell. Type 'hub' to return."; break ;;
-              7) clear; exit 0 ;;
+              5)
+                clear
+                tmux list-windows -t "$TMUX_SESSION" 2>/dev/null || echo "(not in a tmux session)"
+                read -rp "Press Enter to return..." _dummy
+                ;;
+              6)
+                clear
+                echo "Dropped to shell. Type 'hub' to return."
+                break
+                ;;
+              7)
+                clear
+                exit 0
+                ;;
             esac
           done
           HUBEOF
           sudo chmod +x /usr/local/bin/hub
 
-      - name: Build Isolated Brain Auto-Router (h command)
+      - name: Build Isolated Hermes Brain Router (h command)
         run: |
-          cat << 'EOF' | sudo tee /usr/local/bin/h
+          sudo tee /usr/local/bin/h > /dev/null << 'EOF'
           #!/bin/bash
           export PATH="$HOME/.local/bin:/opt/hermes-agent/venv/bin:$PATH"
           REPO_NAME=$(basename "$PWD")
-          if[ "$REPO_NAME" == "workspace" ] || [ "$REPO_NAME" == "workspaces" ] ||[ "$REPO_NAME" == "runner" ]; then
-             echo "❌ You must cd into a repository before starting Hermes."
-             exit 1
+          if [ "$REPO_NAME" = "workspace" ] || [ "$REPO_NAME" = "workspaces" ] || [ "$REPO_NAME" = "runner" ]; then
+            echo "❌ You must cd into a repository before starting Hermes."
+            exit 1
           fi
           export HERMES_HOME="$HOME/.hermes/profiles/$REPO_NAME"
           mkdir -p "$HERMES_HOME"
@@ -312,30 +475,54 @@ jobs:
           REPO="$(hub_current_repo)"
           TARGET="${REPO:-$(pwd)}"
           MSG="${1:-Cloud session save $(date -u '+%Y-%m-%d %H:%M UTC')}"
-          if [ ! -d "$TARGET/.git" ]; then echo "⚠ No git repo at $TARGET."; exit 1; fi
+          if [ ! -d "$TARGET/.git" ]; then
+            echo "⚠  No git repo at $TARGET. Use 'go' or 'cdw' to navigate to one."
+            exit 1
+          fi
           cd "$TARGET" || exit 1
-          git config user.name "$USER"
+          git config user.name  "$USER"
           git config user.email "$(hub_user_email "$USER")"
           git add -A
-          if git diff-index --quiet HEAD 2>/dev/null; then echo "✅ Nothing to commit in $(basename "$TARGET")"; else git commit -m "$MSG" && git push && echo "✅ Saved & pushed: $TARGET"; fi
+          if git diff-index --quiet HEAD 2>/dev/null; then
+            echo "✅ Nothing to commit in $(basename "$TARGET")"
+          else
+            git commit -m "$MSG" && git push && echo "✅ Saved & pushed: $TARGET"
+          fi
           SAVEEOF
           sudo chmod +x /usr/local/bin/save
 
           sudo tee /usr/local/bin/secrets > /dev/null << 'SECEOF'
           #!/bin/bash
           source /usr/local/lib/hubos/lib.sh
-          hub_push_secret_interactive() {
-            local SNAME=$(dialog --clear --inputbox "Secret name:" 8 48 3>&1 1>&2 2>&3) || return
-            local SVAL=$(dialog --clear --passwordbox "Secret value:" 8 48 3>&1 1>&2 2>&3) || return
+          _push_interactive() {
+            local SNAME SVAL
+            SNAME=$(dialog --clear --inputbox "Secret name:" 8 48 3>&1 1>&2 2>&3) || return
+            SVAL=$(dialog --clear --passwordbox "Secret value:" 8 48 3>&1 1>&2 2>&3) || return
             [ -n "$SNAME" ] && [ -n "$SVAL" ] && hub_push_secret "$SNAME" "$SVAL"
           }
           while true; do
-            CHOICE=$(dialog --clear --title "🔐 Quick Secret Manager" --menu "Repo: $(hub_github_repo)" 14 58 5 1 "Push GH_SYNC_TOKEN (PAT)" 2 "Push CACHE_BLOB" 3 "Push CACHE_BLOB_2" 4 "Push custom secret" 5 "Exit" 3>&1 1>&2 2>&3) || break
+            CHOICE=$(dialog --clear --title "🔐 Quick Secret Manager" \
+              --menu "Repo: $(hub_github_repo)" 14 58 5 \
+              1 "Push GH_SYNC_TOKEN (PAT)" \
+              2 "Push CACHE_BLOB" \
+              3 "Push CACHE_BLOB_2" \
+              4 "Push custom secret" \
+              5 "Exit" \
+              3>&1 1>&2 2>&3) || break
             case "$CHOICE" in
-              1) v=$(dialog --clear --passwordbox "PAT value:" 8 48 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v" ;;
-              2) v=$(dialog --clear --inputbox "CACHE_BLOB value:" 10 58 3>&1 1>&2 2>&3);[ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v" ;;
-              3) v=$(dialog --clear --inputbox "CACHE_BLOB_2 value:" 10 58 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v" ;;
-              4) hub_push_secret_interactive ;;
+              1)
+                v=$(dialog --clear --passwordbox "PAT value:" 8 48 3>&1 1>&2 2>&3)
+                [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v"
+                ;;
+              2)
+                v=$(dialog --clear --inputbox "CACHE_BLOB value:" 10 58 3>&1 1>&2 2>&3)
+                [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v"
+                ;;
+              3)
+                v=$(dialog --clear --inputbox "CACHE_BLOB_2 value:" 10 58 3>&1 1>&2 2>&3)
+                [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v"
+                ;;
+              4) _push_interactive ;;
               5) break ;;
             esac
           done
@@ -344,12 +531,44 @@ jobs:
 
           cat >> ~/.bashrc << 'RCEOF'
           source /usr/local/lib/hubos/lib.sh 2>/dev/null
+
           cdw() {
-            local REPO="$(hub_current_repo)"
-            if [ -z "$REPO" ] ||[ ! -d "$REPO" ]; then echo "No repo set."; return 1; fi
+            local REPO
+            REPO="$(hub_current_repo)"
+            if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
+              echo "No repo set. Use 'hub → Select Repository' or 'go <name>' first."
+              return 1
+            fi
             cd "$REPO" && echo "📁 $REPO"
           }
-          alias hub='hub'
+
+          go() {
+            local USER WORKDIR TARGET CHOICE OPTS=()
+            USER="$(hub_active_user)"
+            WORKDIR="$WORKSPACES/$USER"
+            if [ -n "$1" ]; then
+              TARGET=$(find "$WORKDIR" -maxdepth 1 -type d -name "*$1*" 2>/dev/null | head -1)
+              if [ -z "$TARGET" ]; then
+                echo "No repo matching '$1' under $WORKDIR"
+                echo "Available:"
+                ls -1 "$WORKDIR" 2>/dev/null || echo "  (none cloned yet)"
+                return 1
+              fi
+            else
+              while IFS= read -r d; do
+                [ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "→ $d")
+              done < <(find "$WORKDIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
+              if [ ${#OPTS[@]} -eq 0 ]; then
+                echo "No local repos found. Clone one via 'hub'."
+                return 1
+              fi
+              CHOICE=$(dialog --clear --title "Go To Repo" \
+                --menu "Select:" 18 60 12 "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
+              TARGET="$WORKDIR/$CHOICE"
+            fi
+            hub_set_repo "$TARGET"
+            cd "$TARGET" && echo "📁 $TARGET"
+          }
           RCEOF
 
       - name: Configure Pre-loaded User
@@ -364,8 +583,8 @@ jobs:
       - name: Setup Qwen Proxy Accounts
         run: |
           mkdir -p ~/.qwen
-          echo '${{ secrets.CACHE_BLOB }}' > ~/.qwen/oauth_creds_acc1.json
-          echo '${{ secrets.CACHE_BLOB_2 }}' > ~/.qwen/oauth_creds_acc2.json
+          printf '%s' '${{ secrets.CACHE_BLOB }}'   > ~/.qwen/oauth_creds_acc1.json
+          printf '%s' '${{ secrets.CACHE_BLOB_2 }}' > ~/.qwen/oauth_creds_acc2.json
 
       - name: Configure Global Hermes Brain
         run: |
@@ -380,59 +599,108 @@ jobs:
           OPENAI_BASE_URL=http://localhost:8080/v1
           EOF
 
+      - name: Configure Tmux
+        run: |
+          cat > ~/.tmux.conf << 'EOF'
+          set -g status-style        bg=colour236,fg=colour255
+          set -g status-left         "#[fg=colour82,bold] ☁ Cloud OS #[fg=colour245]| "
+          set -g status-right        "#[fg=colour245]%a %H:%M  #[fg=colour82]#{session_windows}w "
+          set -g status-left-length  28
+          set -g status-right-length 32
+          set -g window-status-format         " #I:#W "
+          set -g window-status-current-format "#[fg=colour82,bold,bg=colour238] #I:#W● "
+          set -g mouse on
+          set -g history-limit 50000
+          set -g base-index 1
+          set -g pane-base-index 1
+          set -g default-terminal "screen-256color"
+          set -g escape-time 10
+          set -g renumber-windows on
+          bind r source-file ~/.tmux.conf
+          bind H run-shell "hub"
+          bind S run-shell "save"
+          EOF
+
       - name: Start Qwen Proxy
         run: |
           export QWEN_CODE_AUTH_USE=false
           qwen-proxy serve --headless > ~/proxy.log 2>&1 &
           sleep 6
 
-      - name: Launch SSH & Tunnel
+      - name: Launch SSH, Cloudflare Tunnel & Hub OS
+        env:
+          SESSION_LABEL: ${{ inputs.label || 'Cloud Hub OS' }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          ACTOR="${{ github.actor }}"
+          REPO="${{ github.repository }}"
+          SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
+
           sudo mkdir -p /var/run/sshd
-          sudo ssh-keygen -A
-          echo "Port 2222" | sudo tee -a /etc/ssh/sshd_config
-          echo "PermitRootLogin yes" | sudo tee -a /etc/ssh/sshd_config
-          echo "PasswordAuthentication no" | sudo tee -a /etc/ssh/sshd_config
+          sudo ssh-keygen -A -q
+          {
+            echo "Port 2222"
+            echo "PermitRootLogin no"
+            echo "PasswordAuthentication no"
+            echo "PubkeyAuthentication yes"
+            echo "AllowUsers runner"
+          } | sudo tee -a /etc/ssh/sshd_config > /dev/null
           sudo service ssh start
 
           mkdir -p ~/.ssh
-          curl -sf "https://github.com/${{ github.actor }}.keys" >> ~/.ssh/authorized_keys 2>/dev/null || true
+          curl -sf "https://github.com/$ACTOR.keys" >> ~/.ssh/authorized_keys 2>/dev/null || true
+          chmod 700 ~/.ssh
           chmod 600 ~/.ssh/authorized_keys
 
+          cat >> ~/.bashrc << ENVEOF
+          export SESSION_LABEL="$SESSION_LABEL"
+          export GITHUB_REPOSITORY="$REPO"
+          ENVEOF
+
           cloudflared tunnel --url ssh://localhost:2222 > ~/tunnel.log 2>&1 &
-          sleep 8
+          sleep 10
 
           TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' ~/tunnel.log | head -n1)
-          SOCK=/tmp/cloud-os.sock
-          ACTOR="${{ github.actor }}"
-          SESSION_LABEL="${{ inputs.label || 'Cloud Hub OS' }}"
 
-          tmux new-session -d -s "cloud" -n "monitor"
+          tmux new-session -d -s "cloud" -n "monitor" -x 220 -y 50
           tmux new-window -t "cloud" -n "u-$ACTOR"
           sleep 1
-          tmux send-keys -t "cloud:u-$ACTOR" "export SESSION_LABEL='$SESSION_LABEL'; source ~/.bashrc; clear; hub" Enter
+          tmux send-keys -t "cloud:u-$ACTOR" \
+            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; hub" \
+            Enter
           tmux select-window -t "cloud:monitor"
 
-          log_event() { echo "[EVENT] $(date -u '+%Y-%m-%dT%H:%M:%SZ') $*"; }
-          log_event "SESSION_START" "label=$SESSION_LABEL" "actor=$ACTOR"
-          log_event "TUNNEL_READY" "url=$TUNNEL_URL"
+          echo ""
+          echo "══════════════════════════════════════════════════════════════"
+          echo "  ☁  $SESSION_LABEL"
+          echo "  Actor : $ACTOR"
+          echo "  Repo  : $REPO"
+          echo "  Tunnel: $TUNNEL_URL"
+          echo ""
+          echo "  SSH (requires cloudflared installed on your device):"
+          echo "  ssh -o ProxyCommand='cloudflared access ssh --hostname $TUNNEL_URL' runner@$TUNNEL_URL"
+          echo ""
+          echo "  Tmux: Ctrl+B c=new  n=next  [1-9]=jump  d=detach"
+          echo "══════════════════════════════════════════════════════════════"
+          echo ""
 
           LAST_CLIENTS=0
           TIMER=0
 
           while true; do
-            CLIENTS=$(ss -t state established '( sport = :2222 )' 2>/dev/null | wc -l)
+            CLIENTS=$(ss -t state established '( sport = :2222 )' 2>/dev/null | tail -n +2 | wc -l)
             if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
               if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
-                log_event "USER_JOIN" "active=$CLIENTS" "actor=$ACTOR"
+                echo "[$(date -u '+%H:%M:%S')] 🟢 USER JOINED  — active: $CLIENTS"
               else
-                log_event "USER_LEAVE" "active=$CLIENTS" "actor=$ACTOR"
+                echo "[$(date -u '+%H:%M:%S')] 🔴 USER LEFT   — active: $CLIENTS"
               fi
+              echo "  Tunnel: $TUNNEL_URL"
               LAST_CLIENTS="$CLIENTS"
               TIMER=0
             fi
-            if[ "$TIMER" -ge 900 ]; then
-              log_event "HEARTBEAT" "active=$CLIENTS" "uptime=15min"
+            if [ "$TIMER" -ge 900 ]; then
+              echo "[$(date -u '+%H:%M:%S')] 🕒 Heartbeat — active: $CLIENTS — $TUNNEL_URL"
               TIMER=0
             fi
             sleep 5
@@ -443,10 +711,15 @@ jobs:
         if: always()
         run: |
           source /usr/local/lib/hubos/lib.sh 2>/dev/null || true
-          for user_dir in "$WORKSPACES"/*/; do[ -d "$user_dir" ] || continue
+          echo "════ Auto-Save Triggered ════"
+          for user_dir in "$WORKSPACES"/*/; do
+            [ -d "$user_dir" ] || continue
             USER="$(basename "$user_dir")"
             for repo_dir in "$user_dir"*/; do
               [ -d "$repo_dir/.git" ] || continue
-              hub_save_repo "$repo_dir" "Auto-save: runner exit $(date -u '+%Y-%m-%d %H:%M UTC')" "$USER"
+              hub_save_repo "$repo_dir" \
+                "Auto-save: runner exit $(date -u '+%Y-%m-%d %H:%M UTC')" \
+                "$USER"
             done
           done
+          echo "════ Auto-Save Complete ════"

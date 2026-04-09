@@ -1,23 +1,3 @@
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║               ☁  CLOUD HUB OS  —  GitHub Actions Runner                ║
-# ║                                                                          ║
-# ║  A persistent, multi-user cloud terminal environment.                   ║
-# ║  Access via SSH or browser from any device (Termux, iOS, Linux, etc.)  ║
-# ║                                                                          ║
-# ║  REQUIRED SECRETS (Settings → Secrets → Actions):                       ║
-# ║    GH_SYNC_TOKEN   — GitHub PAT (scopes: repo, workflow)                ║
-# ║    CACHE_BLOB      — Qwen oauth credentials JSON (account 1)            ║
-# ║    CACHE_BLOB_2    — Qwen oauth credentials JSON (account 2)            ║
-# ║                                                                          ║
-# ║  TOOLS AVAILABLE IN EVERY SHELL:                                        ║
-# ║    hub        → main OS menu                                             ║
-# ║    cdw        → cd to current repo root                                 ║
-# ║    go [name]  → switch to another repo (fuzzy name match or picker)     ║
-# ║    save [msg] → git add + commit + push current repo                    ║
-# ║    secrets    → open secret manager (push secrets to GitHub)            ║
-# ║    crush -y   → start AI code analysis                                  ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-
 name: ☁ Cloud Hub OS
 
 on:
@@ -37,19 +17,18 @@ on:
 jobs:
   cloud-os:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # Hard cap at GitHub max
+    timeout-minutes: 360
+
+    permissions:
+      contents: read
 
     steps:
 
-      # ──────────────────────────────────────────────────────────────────────
-      #  1. BASE SETUP
-      # ──────────────────────────────────────────────────────────────────────
-
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
 
@@ -58,12 +37,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ──────────────────────────────────────────────────────────────────────
-      #  2. INSTALL SYSTEM DEPENDENCIES
-      #     clang, python, node are required by the OS rule.
-      #     tmate = SSH tunnel | tmux = session manager | dialog = TUI menus
-      #     libsodium-dev + PyNaCl = GitHub Secrets API encryption
-      # ──────────────────────────────────────────────────────────────────────
+      - name: Fix Global Node/NPM Path
+        run: |
+          NPM_BIN=$(npm config get prefix)/bin
+          echo "$NPM_BIN" >> $GITHUB_PATH
+          echo "export PATH=\"$NPM_BIN:\$PATH\"" >> ~/.bashrc
+          echo "export PATH=\"$NPM_BIN:\$PATH\"" >> ~/.profile
+          echo "export PATH=\"$NPM_BIN:\$PATH\"" | sudo tee -a /etc/environment
 
       - name: Install System Packages
         run: |
@@ -71,41 +51,46 @@ jobs:
           sudo apt-get install -y -qq \
             clang \
             tmux \
-            tmate \
             dialog \
             jq \
             python3-pip \
             libsodium-dev \
-            git
+            git \
+            curl \
+            openssh-server \
+            cloudflared \
+            procps
           pip install PyNaCl --break-system-packages -q
 
-      - name: Install Node Global Tools
+      - name: Install Global Tools
         run: |
           npm install -g @charmland/crush qwen-proxy --silent --no-fund --no-audit
-
-      # ──────────────────────────────────────────────────────────────────────
-      #  3. BUILD THE SECRET ENCRYPTION HELPER
-      #     Used by the hub to push secrets to GitHub via REST API.
-      #     GitHub requires secrets to be encrypted with the repo's
-      #     LibSodium public key before they can be stored.
-      # ──────────────────────────────────────────────────────────────────────
+          
+          if command -v crush &> /dev/null; then
+            echo "✅ crush is installed globally"
+          else
+            echo "❌ crush is NOT in PATH"
+            exit 1
+          fi
+          
+          if command -v qwen-proxy &> /dev/null; then
+            echo "✅ qwen-proxy is installed globally"
+          else
+            echo "❌ qwen-proxy is NOT in PATH"
+            exit 1
+          fi
 
       - name: Build Secret Encryption Helper
         run: |
           sudo tee /usr/local/bin/hub_encrypt.py > /dev/null << 'PYEOF'
           #!/usr/bin/env python3
-          # Usage: hub_encrypt.py <base64_public_key> <secret_value>
-          # Prints base64-encoded sealed box (libsodium) for GitHub Secrets API.
           import sys, base64
           from nacl import encoding, public
-
           if len(sys.argv) != 3:
               print("Usage: hub_encrypt.py <b64_pubkey> <secret_value>", file=sys.stderr)
               sys.exit(1)
-
           pub_b64 = sys.argv[1]
           secret  = sys.argv[2]
-
           try:
               pk  = public.PublicKey(pub_b64.encode(), encoding.Base64Encoder())
               box = public.SealedBox(pk)
@@ -117,18 +102,10 @@ jobs:
           PYEOF
           sudo chmod +x /usr/local/bin/hub_encrypt.py
 
-      # ──────────────────────────────────────────────────────────────────────
-      #  4. BUILD THE HUB OS SHARED LIBRARY
-      #     All core logic lives here. hub, secrets, and other tools source
-      #     this file so functions are shared without duplication.
-      # ──────────────────────────────────────────────────────────────────────
-
       - name: Build Hub OS Library
         run: |
           sudo mkdir -p /usr/local/lib/hubos
           sudo tee /usr/local/lib/hubos/lib.sh > /dev/null << 'LIBEOF'
-          # ── Hub OS Shared Library ─────────────────────────────────────────
-          # Source this file; do not execute directly.
 
           export HUB_DIR="$HOME/.crush_hub"
           export USERS_DIR="$HUB_DIR/users"
@@ -139,49 +116,38 @@ jobs:
 
           mkdir -p "$USERS_DIR" "$WORKSPACES" "$HUB_CONF"
 
-          # ── Get active user ───────────────────────────────────────────────
           hub_active_user() {
             cat "$HUB_CONF/active_user" 2>/dev/null \
               || ls -1t "$USERS_DIR" 2>/dev/null | head -n1 \
               || echo "default"
           }
 
-          # ── Set active user ───────────────────────────────────────────────
           hub_set_user() {
             echo "$1" > "$HUB_CONF/active_user"
           }
 
-          # ── Read user PAT ─────────────────────────────────────────────────
           hub_user_pat() {
             local u="${1:-$(hub_active_user)}"
             cat "$USERS_DIR/$u/pat" 2>/dev/null
           }
 
-          # ── Read user email ───────────────────────────────────────────────
           hub_user_email() {
             local u="${1:-$(hub_active_user)}"
             cat "$USERS_DIR/$u/email" 2>/dev/null || echo "${u}@cloud.local"
           }
 
-          # ── Read current repo path ────────────────────────────────────────
           hub_current_repo() {
             cat "$HUB_CONF/current_repo" 2>/dev/null
           }
 
-          # ── Set current repo path ─────────────────────────────────────────
           hub_set_repo() {
             echo "$1" > "$HUB_CONF/current_repo"
           }
 
-          # ── Read GitHub repo (owner/name) from env or config ──────────────
           hub_github_repo() {
             echo "${GITHUB_REPOSITORY:-$(cat "$HUB_CONF/github_repo" 2>/dev/null)}"
           }
 
-          # ─────────────────────────────────────────────────────────────────
-          #  Push a GitHub Actions secret via REST API
-          #  Usage: hub_push_secret SECRET_NAME value [pat]
-          # ─────────────────────────────────────────────────────────────────
           hub_push_secret() {
             local sname="$1"
             local sval="$2"
@@ -202,7 +168,6 @@ jobs:
               return 1
             fi
 
-            # Fetch repo public key for encryption
             local pk_json
             pk_json=$(curl -sf \
               -H "Authorization: Bearer $pat" \
@@ -210,7 +175,7 @@ jobs:
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/$repo/actions/secrets/public-key" 2>/dev/null)
 
-            if [ -z "$pk_json" ] || [ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
+            if [ -z "$pk_json" ] ||[ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
               dialog --msgbox "ERROR: Could not fetch repo public key.\nCheck that PAT has 'repo' scope." 7 55
               return 1
             fi
@@ -219,15 +184,13 @@ jobs:
             key_id=$(echo "$pk_json" | jq -r '.key_id')
             key_val=$(echo "$pk_json" | jq -r '.key')
 
-            # Encrypt with LibSodium (SealedBox)
             local encrypted
             encrypted=$(python3 /usr/local/bin/hub_encrypt.py "$key_val" "$sval" 2>/dev/null)
-            if [ -z "$encrypted" ]; then
+            if[ -z "$encrypted" ]; then
               dialog --msgbox "ERROR: Encryption failed.\nIs PyNaCl installed? (pip install PyNaCl)" 7 55
               return 1
             fi
 
-            # PUT to GitHub Secrets API
             local http_code
             http_code=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
               -H "Authorization: Bearer $pat" \
@@ -252,10 +215,6 @@ jobs:
             esac
           }
 
-          # ─────────────────────────────────────────────────────────────────
-          #  Save a repo: git add, commit, push
-          #  Usage: hub_save_repo /path/to/repo [commit message] [user]
-          # ─────────────────────────────────────────────────────────────────
           hub_save_repo() {
             local repo_path="$1"
             local msg="${2:-Cloud session sync $(date -u '+%Y-%m-%d %H:%M UTC')}"
@@ -277,14 +236,10 @@ jobs:
             ) 2>&1
           }
 
-          # ─────────────────────────────────────────────────────────────────
-          #  Ensure the active user has their own named tmux/tmate window.
-          #  This lets multiple users work independently in the same session.
-          # ─────────────────────────────────────────────────────────────────
           hub_ensure_window() {
             local user="${1:-$(hub_active_user)}"
             local win_name="u-${user}"
-            if [ -n "$TMUX" ] || tmate -S "$TMUX_SOCK" ls 2>/dev/null | grep -q .; then
+            if[ -n "$TMUX" ] || tmate -S "$TMUX_SOCK" ls 2>/dev/null | grep -q .; then
               local sock="${TMUX:-$TMUX_SOCK}"
               if ! tmate -S "$TMUX_SOCK" list-windows -F '#W' 2>/dev/null | grep -qx "$win_name"; then
                 tmate -S "$TMUX_SOCK" new-window -n "$win_name" 2>/dev/null
@@ -296,20 +251,14 @@ jobs:
           LIBEOF
           sudo chmod 644 /usr/local/lib/hubos/lib.sh
 
-      # ──────────────────────────────────────────────────────────────────────
-      #  5. BUILD THE MAIN HUB OS SCRIPT
-      # ──────────────────────────────────────────────────────────────────────
-
       - name: Build Hub OS Main Script
         run: |
           sudo tee /usr/local/bin/hub > /dev/null << 'HUBEOF'
           #!/bin/bash
-          # Hub OS — Main menu entrypoint
           source /usr/local/lib/hubos/lib.sh
 
           CURRENT_USER="$(hub_active_user)"
 
-          # ── Secrets Manager Menu ──────────────────────────────────────────
           _menu_secrets() {
             while true; do
               local REPO
@@ -336,8 +285,7 @@ jobs:
                   ;;
                 2)
                   local v
-                  v=$(dialog --clear --inputbox "Paste CACHE_BLOB JSON content:" 10 62 3>&1 1>&2 2>&3)
-                  [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v"
+                  v=$(dialog --clear --inputbox "Paste CACHE_BLOB JSON content:" 10 62 3>&1 1>&2 2>&3)[ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v"
                   ;;
                 3)
                   local v
@@ -363,7 +311,6 @@ jobs:
             done
           }
 
-          # ── Repository Picker Menu ────────────────────────────────────────
           _menu_repos() {
             local PAT
             PAT="$(hub_user_pat "$CURRENT_USER")"
@@ -385,7 +332,6 @@ jobs:
               return
             fi
 
-            # Build dialog array (tag desc pairs) — safe for names with spaces
             local OPTS=()
             while IFS= read -r r; do
               OPTS+=("$r" "→")
@@ -406,7 +352,6 @@ jobs:
                 dialog --msgbox "Clone failed for $REPO_CHOICE.\nCheck PAT and repo access." 6 50
                 return
               fi
-              # Set up git identity for this repo
               git -C "$REPO_DIR" config user.name  "$CURRENT_USER"
               git -C "$REPO_DIR" config user.email "$(hub_user_email "$CURRENT_USER")"
             fi
@@ -423,16 +368,13 @@ jobs:
           ║  cdw        → jump to repo root             ║
           ║  go [name]  → switch to another repo        ║
           ║  save       → commit & push                 ║
-          ║  secrets    → manage GitHub secrets         ║
           ║  hub        → back to main menu             ║
           ╚══════════════════════════════════════════════╝
           BANNER
             printf '\e[0m'
-            # Start an interactive shell rooted in the repo
             bash --rcfile <(cat ~/.bashrc; echo "cd '$REPO_DIR'")
           }
 
-          # ── User Management Menu ──────────────────────────────────────────
           _menu_users() {
             while true; do
               local USERS_LIST
@@ -460,7 +402,6 @@ jobs:
             done
           }
 
-          # ── Add New User ──────────────────────────────────────────────────
           _add_user() {
             local NEW_USER
             NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)
@@ -489,11 +430,10 @@ jobs:
             local NEW_EMAIL
             NEW_EMAIL=$(echo "$PROFILE" | jq -r '.email // empty')
 
-            if [ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then
+            if [ -z "$NEW_EMAIL" ] ||[ "$NEW_EMAIL" = "null" ]; then
               NEW_EMAIL=$(dialog --clear --inputbox \
                 "Email not on public profile.\nEnter your git commit email:" \
-                9 52 3>&1 1>&2 2>&3)
-              [ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"
+                9 52 3>&1 1>&2 2>&3)[ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"
             fi
 
             mkdir -p "$USERS_DIR/$NEW_USER"
@@ -503,7 +443,6 @@ jobs:
             hub_set_user "$CURRENT_USER"
             hub_ensure_window "$CURRENT_USER"
 
-            # Offer to persist PAT as GitHub secret for next run
             if dialog --yesno \
               "User '$NEW_USER' added! ✅\n\nDo you want to save this PAT as\nGH_SYNC_TOKEN in GitHub Secrets?\n(makes it available on next run)" \
               10 55; then
@@ -511,7 +450,6 @@ jobs:
             fi
           }
 
-          # ── Save All Repos ────────────────────────────────────────────────
           _save_all() {
             dialog --infobox "Saving all open repositories..." 4 40
             local results=""
@@ -524,7 +462,6 @@ jobs:
             dialog --msgbox "Save complete:\n\n${results:-No repos found.}" 14 55
           }
 
-          # ── Main Loop ─────────────────────────────────────────────────────
           hub_ensure_window "$CURRENT_USER"
 
           while true; do
@@ -543,7 +480,6 @@ jobs:
               7 "❌ Exit Hub" \
               3>&1 1>&2 2>&3)
 
-            # Escape or empty = drop to shell
             [ $? -ne 0 ] && CHOICE=6
 
             case "$CHOICE" in
@@ -591,16 +527,8 @@ jobs:
           HUBEOF
           sudo chmod +x /usr/local/bin/hub
 
-      # ──────────────────────────────────────────────────────────────────────
-      #  6. BUILD HELPER TOOLS
-      #     cdw / go must be shell FUNCTIONS (not scripts) so they can `cd`
-      #     in the calling shell. They go into ~/.bashrc.
-      #     save / secrets ARE standalone scripts (they don't need to cd).
-      # ──────────────────────────────────────────────────────────────────────
-
       - name: Build Helper Tools
         run: |
-          # ── standalone: save ──────────────────────────────────────────────
           sudo tee /usr/local/bin/save > /dev/null << 'SAVEEOF'
           #!/bin/bash
           source /usr/local/lib/hubos/lib.sh
@@ -608,7 +536,7 @@ jobs:
           REPO="$(hub_current_repo)"
           TARGET="${REPO:-$(pwd)}"
           MSG="${1:-Cloud session save $(date -u '+%Y-%m-%d %H:%M UTC')}"
-          if [ ! -d "$TARGET/.git" ]; then
+          if[ ! -d "$TARGET/.git" ]; then
             echo "⚠  No git repo at $TARGET. Use 'go' or 'cdw' to navigate to one."
             exit 1
           fi
@@ -625,17 +553,14 @@ jobs:
           SAVEEOF
           sudo chmod +x /usr/local/bin/save
 
-          # ── standalone: secrets ───────────────────────────────────────────
           sudo tee /usr/local/bin/secrets > /dev/null << 'SECEOF'
           #!/bin/bash
-          # Opens secret manager outside of hub main loop
           source /usr/local/lib/hubos/lib.sh
 
           hub_push_secret_interactive() {
             local SNAME SVAL
             SNAME=$(dialog --clear --inputbox "Secret name:" 8 48 3>&1 1>&2 2>&3) || return
-            SVAL=$(dialog --clear --passwordbox "Secret value:" 8 48 3>&1 1>&2 2>&3) || return
-            [ -n "$SNAME" ] && [ -n "$SVAL" ] && hub_push_secret "$SNAME" "$SVAL"
+            SVAL=$(dialog --clear --passwordbox "Secret value:" 8 48 3>&1 1>&2 2>&3) || return[ -n "$SNAME" ] && [ -n "$SVAL" ] && hub_push_secret "$SNAME" "$SVAL"
           }
 
           while true; do
@@ -648,7 +573,7 @@ jobs:
               5 "Exit" \
               3>&1 1>&2 2>&3) || break
             case "$CHOICE" in
-              1) v=$(dialog --clear --passwordbox "PAT value:" 8 48 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v" ;;
+              1) v=$(dialog --clear --passwordbox "PAT value:" 8 48 3>&1 1>&2 2>&3);[ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v" ;;
               2) v=$(dialog --clear --inputbox  "CACHE_BLOB value:" 10 58 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v" ;;
               3) v=$(dialog --clear --inputbox  "CACHE_BLOB_2 value:" 10 58 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v" ;;
               4) hub_push_secret_interactive ;;
@@ -658,33 +583,26 @@ jobs:
           SECEOF
           sudo chmod +x /usr/local/bin/secrets
 
-          # ── bashrc functions: cdw, go ─────────────────────────────────────
-          # These MUST be shell functions (not scripts) because `cd` only
-          # takes effect in the calling shell, not in subprocesses.
           cat >> ~/.bashrc << 'RCEOF'
 
-          # ── Hub OS shell functions ────────────────────────────────────────
           source /usr/local/lib/hubos/lib.sh 2>/dev/null
 
-          # cdw: go to current repo root
           cdw() {
             local REPO
             REPO="$(hub_current_repo)"
-            if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
+            if [ -z "$REPO" ] ||[ ! -d "$REPO" ]; then
               echo "No repo set. Use 'hub → Select Repository' first, or 'go <name>'."
               return 1
             fi
             cd "$REPO" && echo "📁 $REPO"
           }
 
-          # go [name]: switch to a repo by fuzzy name, or open a picker
           go() {
             local USER WORKDIR TARGET
             USER="$(hub_active_user)"
             WORKDIR="$WORKSPACES/$USER"
 
             if [ -n "$1" ]; then
-              # Fuzzy match on repo name
               TARGET=$(find "$WORKDIR" -maxdepth 1 -type d -name "*$1*" 2>/dev/null | head -1)
               if [ -z "$TARGET" ]; then
                 echo "No repo matching '$1' found under $WORKDIR"
@@ -693,7 +611,6 @@ jobs:
                 return 1
               fi
             else
-              # Interactive picker
               local OPTS=()
               while IFS= read -r d; do
                 [ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "→ $d")
@@ -714,13 +631,8 @@ jobs:
             cd "$TARGET" && echo "📁 $TARGET"
           }
 
-          # Convenience alias
           alias hub='hub'
           RCEOF
-
-      # ──────────────────────────────────────────────────────────────────────
-      #  7. CONFIGURE PRE-LOADED USER
-      # ──────────────────────────────────────────────────────────────────────
 
       - name: Configure Pre-loaded User
         run: |
@@ -733,15 +645,9 @@ jobs:
             > "$USERS_DIR/${{ github.actor }}/email"
           hub_set_user "${{ github.actor }}"
 
-          # Store repo info for Secrets API (non-secret, just metadata)
           printf '%s' '${{ github.repository }}' > "$HUB_CONF/github_repo"
 
           echo "✅ Pre-loaded user: ${{ github.actor }}"
-          echo "✅ Repo context:    ${{ github.repository }}"
-
-      # ──────────────────────────────────────────────────────────────────────
-      #  8. CONFIGURE QWEN + CRUSH
-      # ──────────────────────────────────────────────────────────────────────
 
       - name: Setup Qwen Credentials & Crush Config
         run: |
@@ -757,7 +663,7 @@ jobs:
                 "type": "openai-compat",
                 "base_url": "http://localhost:8080/v1",
                 "api_key": "dummy",
-                "models": [
+                "models":[
                   {
                     "id": "coder-model",
                     "name": "Qwen 3.6 Plus",
@@ -772,172 +678,88 @@ jobs:
           }
           EOF
 
-      # ──────────────────────────────────────────────────────────────────────
-      #  9. START QWEN PROXY
-      # ──────────────────────────────────────────────────────────────────────
-
       - name: Start Qwen Proxy
         run: |
           export QWEN_CODE_AUTH_USE=false
           qwen-proxy serve --headless > ~/proxy.log 2>&1 &
           sleep 6
           echo "═══════════ PROXY LOGS ═══════════"
-          cat ~/proxy.log
+          tail -n 20 ~/proxy.log
           echo "══════════════════════════════════"
 
-      # ──────────────────────────────────────────────────────────────────────
-      #  10. CONFIGURE TMUX APPEARANCE
-      # ──────────────────────────────────────────────────────────────────────
-
-      - name: Configure Tmux
+      - name: Launch SSH & Tunnel
         run: |
-          cat > ~/.tmux.conf << 'EOF'
-          # ── Cloud Hub OS tmux config ──────────────────────────────────────
-          set -g status-style        bg=colour236,fg=colour255
-          set -g status-left         "#[fg=colour82,bold] ☁ Cloud OS #[fg=colour245]| "
-          set -g status-right        "#[fg=colour245]%a %H:%M  #[fg=colour82]#{session_windows} wins "
-          set -g status-left-length  28
-          set -g status-right-length 35
-          set -g window-status-format         " #I:#W "
-          set -g window-status-current-format "#[fg=colour82,bold,bg=colour238] #I:#W● "
-          set -g window-status-separator      ""
+          sudo mkdir -p /var/run/sshd
+          sudo ssh-keygen -A
+          echo "Port 2222" | sudo tee -a /etc/ssh/sshd_config
+          echo "PermitRootLogin yes" | sudo tee -a /etc/ssh/sshd_config
+          echo "PasswordAuthentication no" | sudo tee -a /etc/ssh/sshd_config
+          sudo service ssh start
 
-          # Quality of life
-          set -g mouse on
-          set -g history-limit 50000
-          set -g base-index 1
-          set -g pane-base-index 1
-          set -g default-terminal "screen-256color"
-          set -g escape-time 10
-          set -g renumber-windows on
-
-          # Key bindings
-          bind r source-file ~/.tmux.conf \; display "Config reloaded!"
-          bind H hub                        # Ctrl+B H → open hub
-          bind S run-shell "save"           # Ctrl+B S → save current repo
-          EOF
-
-      # ──────────────────────────────────────────────────────────────────────
-      #  11. LAUNCH CLOUD OS + WATCHTOWER
-      #
-      #  Architecture:
-      #    tmate creates a shared tmux-compatible session accessible via SSH
-      #    and browser. Each user gets their own named window (u-username)
-      #    created by hub on first use.
-      #
-      #  Multi-user behaviour:
-      #    - All users share the same tmate session (by design).
-      #    - Each user navigates to their own window: Ctrl+B [num]
-      #    - hub auto-creates and selects your personal window.
-      #    - Users can work fully independently in separate windows.
-      #    - Window 1 (monitor) shows links + activity log.
-      # ──────────────────────────────────────────────────────────────────────
-
-      - name: Launch Cloud Hub OS
-        env:
-          SESSION_LABEL: ${{ inputs.label || 'Cloud Hub OS' }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          GH_SYNC_TOKEN: ${{ secrets.GH_SYNC_TOKEN }}
-        run: |
-          SOCK=/tmp/cloud-os.sock
-          ACTOR="${{ github.actor }}"
-          SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
-          REPO="${GITHUB_REPOSITORY}"
-
-          # ── SSH keys: authorize the actor's GitHub keys ───────────────────
           mkdir -p ~/.ssh
-          curl -sf "https://github.com/$ACTOR.keys" >> ~/.ssh/authorized_keys 2>/dev/null || true
+          curl -sf "https://github.com/${{ github.actor }}.keys" >> ~/.ssh/authorized_keys 2>/dev/null || true
           chmod 600 ~/.ssh/authorized_keys
 
-          # ── Export env to bashrc so all new shells inherit it ─────────────
-          cat >> ~/.bashrc << ENVEOF
-          export SESSION_LABEL="$SESSION_LABEL"
-          export GITHUB_REPOSITORY="$REPO"
-          export GITHUB_REPOSITORY_OWNER="${GITHUB_REPOSITORY_OWNER}"
-          ENVEOF
+          cloudflared tunnel --url ssh://localhost:2222 > ~/tunnel.log 2>&1 &
+          sleep 8
 
-          # ── Create tmate session: window 1 = monitor ──────────────────────
-          tmate -S "$SOCK" -a ~/.ssh/authorized_keys \
-            new-session -d -s "cloud" -n "🖥 monitor" \
-            -x 220 -y 50
+          TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' ~/tunnel.log | head -n1)
+          echo "🌐 Tunnel URL: $TUNNEL_URL"
 
-          # Wait for tmate to register with ssh.tmate.io
-          tmate -S "$SOCK" wait tmate-ready
+          SOCK=/tmp/cloud-os.sock
+          ACTOR="${{ github.actor }}"
+          SESSION_LABEL="${{ inputs.label || 'Cloud Hub OS' }}"
 
-          SSH_LINK=$(tmate -S "$SOCK" display -p '#{tmate_ssh}')
-          SESSION_ID=$(echo "$SSH_LINK" | cut -d'@' -f1 | cut -d' ' -f2)
-          WEB_LINK="https://tmate.io/t/$SESSION_ID"
-
-          # ── Display MOTD in monitor window ────────────────────────────────
-          tmate -S "$SOCK" send-keys -t "cloud:🖥 monitor" \
-            "source ~/.bashrc; clear; cat << 'MOTD'
-          ╔═══════════════════════════════════════════════════════════╗
-          ║  ☁  ${SESSION_LABEL}                                     
-          ║  SSH : $SSH_LINK  
-          ║  WEB : $WEB_LINK  
-          ╠═══════════════════════════════════════════════════════════╣
-          ║  Waiting for connections...                               ║
-          ║  Other users: share the SSH or WEB link above.           ║
-          ║  Each user gets their own tmux window via 'hub'.         ║
-          ╚═══════════════════════════════════════════════════════════╝
-          MOTD" Enter
-
-          # ── Pre-create actor's personal window with hub running ────────────
-          tmate -S "$SOCK" new-window -t "cloud" -n "u-$ACTOR"
+          tmux new-session -d -s "cloud" -n "monitor"
+          
+          tmux new-window -t "cloud" -n "u-$ACTOR"
           sleep 1
-          tmate -S "$SOCK" send-keys -t "cloud:u-$ACTOR" \
-            "source ~/.bashrc; hub" Enter
+          tmux send-keys -t "cloud:u-$ACTOR" \
+            "export SESSION_LABEL='$SESSION_LABEL'; source ~/.bashrc; clear; hub" Enter
 
-          # ── Print links to Actions log ─────────────────────────────────────
+          tmux select-window -t "cloud:monitor"
+
           echo ""
-          echo "══════════════════════════════════════════════════════════"
-          echo "  ☁ CLOUD HUB OS — READY"
-          echo "  SSH : $SSH_LINK"
-          echo "  WEB : $WEB_LINK"
-          echo "  User: $ACTOR"
-          echo "  Repo: $REPO"
-          echo "  Label: $SESSION_LABEL"
-          echo "══════════════════════════════════════════════════════════"
+          echo "╔═══════════════════════════════════════════════════╗"
+          echo "║  ☁  ${SESSION_LABEL} RUNNING"
+          echo "║  SSH  : ssh -p 2222 $ACTOR@${TUNNEL_URL#*//}"
+          echo "║  TERMUX: ssh -p 2222 $ACTOR@${TUNNEL_URL#*//}"
+          echo "╠═══════════════════════════════════════════════════╣"
+          echo "║  ⚠️  Wait 10 seconds for tunnel to fully stabilize before connecting!"
+          echo "╚═══════════════════════════════════════════════════╝"
           echo ""
 
-          # ── Watchtower loop ────────────────────────────────────────────────
-          # Monitors connections, logs joins/leaves, reprints link every 15m.
-          # This loop IS the step that keeps the workflow alive.
+          log_event() {
+            echo "[EVENT] $(date -u '+%Y-%m-%dT%H:%M:%SZ') $*"
+          }
+
+          log_event "SESSION_START" "label=$SESSION_LABEL" "actor=$ACTOR"
+          log_event "TUNNEL_READY" "url=$TUNNEL_URL"
+
           LAST_CLIENTS=0
           TIMER=0
 
           while true; do
-            CLIENTS=$(tmate -S "$SOCK" list-clients 2>/dev/null | wc -l)
+            CLIENTS=$(ss -t state established '( sport = :2222 )' 2>/dev/null | wc -l)
 
-            if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
-              if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
-                echo "[$(date '+%H:%M:%S')] 🟢 USER JOINED  — active connections: $CLIENTS"
+            if[ "$CLIENTS" != "$LAST_CLIENTS" ]; then
+              if[ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
+                log_event "USER_JOIN" "active=$CLIENTS" "actor=$ACTOR"
               else
-                echo "[$(date '+%H:%M:%S')] 🔴 USER LEFT   — active connections: $CLIENTS"
+                log_event "USER_LEAVE" "active=$CLIENTS" "actor=$ACTOR"
               fi
-              echo "  SSH: $SSH_LINK"
-              echo "  WEB: $WEB_LINK"
               LAST_CLIENTS="$CLIENTS"
               TIMER=0
             fi
 
             if [ "$TIMER" -ge 900 ]; then
-              echo "[$(date '+%H:%M:%S')] 🕒 15-min reminder:"
-              echo "  SSH: $SSH_LINK"
-              echo "  WEB: $WEB_LINK"
+              log_event "HEARTBEAT" "active=$CLIENTS" "uptime=15min"
               TIMER=0
             fi
 
             sleep 5
             TIMER=$((TIMER + 5))
           done
-
-      # ──────────────────────────────────────────────────────────────────────
-      #  12. AUTO-SAVE ON EXIT
-      #      Runs even if the session crashes or times out.
-      #      Commits and pushes all dirty repos for every user.
-      # ──────────────────────────────────────────────────────────────────────
 
       - name: Auto-Save All Repos on Exit
         if: always()

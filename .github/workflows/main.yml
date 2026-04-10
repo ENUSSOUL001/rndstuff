@@ -161,6 +161,14 @@ jobs:
             curl -sf "$PROXY_URL/v1/models" >/dev/null 2>&1
           }
 
+          hub_proxy_account_status() {
+            grep -E 'acc[0-9]+:' ~/proxy.log 2>/dev/null | tail -5
+          }
+
+          hub_proxy_any_invalid() {
+            grep -qiE 'acc[0-9]+: *(invalid|expired)' ~/proxy.log 2>/dev/null
+          }
+
           hub_write_hermes_config() {
             local profile_dir="$1"
             mkdir -p "$profile_dir"
@@ -293,49 +301,104 @@ jobs:
           source /usr/local/lib/hubos/lib.sh
           CURRENT_USER="$(hub_active_user)"
 
+          _read_multiline() {
+            local prompt_title="$1"
+            local prompt_body="$2"
+            clear
+            printf '+----------------------------------------------------------+\n'
+            printf '|  %s\n' "$prompt_title"
+            printf '+----------------------------------------------------------+\n'
+            printf '%s\n' "$prompt_body"
+            printf '\n  Paste below. Press Enter then Ctrl+D on a blank line when done.\n\n'
+            cat
+          }
+
+          _confirm_secret() {
+            local name="$1"
+            local value="$2"
+            local preview="${value:0:80}"
+            local len="${#value}"
+            dialog --yesno "Confirm push secret: $name\n\nPreview (first 80 chars):\n$preview\n\nTotal length: $len chars\n\nProceed?" 14 66
+          }
+
           _menu_secrets() {
             while true; do
               local REPO SCHOICE
               REPO="$(hub_github_repo)"
               SCHOICE=$(dialog --clear --title "Secret Manager" \
-                --menu "Repo: ${REPO:-not set}" 18 62 6 \
+                --menu "Repo: ${REPO:-not set}" 20 66 7 \
                 1 "Save PAT -> GH_SYNC_TOKEN" \
-                2 "Save Qwen blob 1 -> CACHE_BLOB" \
-                3 "Save Qwen blob 2 -> CACHE_BLOB_2" \
-                4 "Push a custom secret..." \
-                5 "How does this work?" \
-                6 "Back" \
+                2 "Save Qwen blob 1 -> CACHE_BLOB (JSON, multiline)" \
+                3 "Save Qwen blob 2 -> CACHE_BLOB_2 (JSON, multiline)" \
+                4 "Push a custom secret (single line)" \
+                5 "Push a custom secret (multiline / JSON)" \
+                6 "How does this work?" \
+                7 "Back" \
                 3>&1 1>&2 2>&3) || return
               case "$SCHOICE" in
                 1)
                   local v
-                  v=$(dialog --clear --passwordbox "GitHub PAT (classic, repo+workflow scope):" 9 58 3>&1 1>&2 2>&3)
-                  [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v"
+                  v=$(dialog --clear --passwordbox \
+                    "GitHub PAT (classic, repo+workflow scope):" 9 58 3>&1 1>&2 2>&3)
+                  if [ -n "$v" ]; then
+                    local confirm
+                    confirm=$(dialog --clear --passwordbox \
+                      "Confirm PAT (type again):" 9 58 3>&1 1>&2 2>&3)
+                    if [ "$v" = "$confirm" ]; then
+                      hub_push_secret "GH_SYNC_TOKEN" "$v"
+                    else
+                      dialog --msgbox "PAT entries do not match. Not saved." 6 44
+                    fi
+                  fi
                   ;;
                 2)
                   local v
-                  v=$(dialog --clear --inputbox "Paste CACHE_BLOB JSON content:" 10 62 3>&1 1>&2 2>&3)
-                  [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v"
+                  v=$(_read_multiline "CACHE_BLOB" \
+                    "  Paste the full JSON from ~/.qwen/oauth_creds_acc1.json")
+                  if [ -n "$v" ] && _confirm_secret "CACHE_BLOB" "$v"; then
+                    hub_push_secret "CACHE_BLOB" "$v"
+                  fi
                   ;;
                 3)
                   local v
-                  v=$(dialog --clear --inputbox "Paste CACHE_BLOB_2 JSON content:" 10 62 3>&1 1>&2 2>&3)
-                  [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v"
+                  v=$(_read_multiline "CACHE_BLOB_2" \
+                    "  Paste the full JSON from ~/.qwen/oauth_creds_acc2.json")
+                  if [ -n "$v" ] && _confirm_secret "CACHE_BLOB_2" "$v"; then
+                    hub_push_secret "CACHE_BLOB_2" "$v"
+                  fi
                   ;;
                 4)
                   local sname sval
                   sname=$(dialog --clear --inputbox "Secret name (e.g. MY_API_KEY):" 8 52 3>&1 1>&2 2>&3)
                   if [ -n "$sname" ]; then
                     sval=$(dialog --clear --passwordbox "Secret value:" 8 52 3>&1 1>&2 2>&3)
-                    [ -n "$sval" ] && hub_push_secret "$sname" "$sval"
+                    if [ -n "$sval" ]; then
+                      local confirm
+                      confirm=$(dialog --clear --passwordbox "Confirm secret value:" 8 52 3>&1 1>&2 2>&3)
+                      if [ "$sval" = "$confirm" ]; then
+                        hub_push_secret "$sname" "$sval"
+                      else
+                        dialog --msgbox "Values do not match. Not saved." 6 38
+                      fi
+                    fi
                   fi
                   ;;
                 5)
-                  dialog --msgbox \
-                    "Secrets are encrypted with LibSodium and pushed\nto GitHub via REST API. They are injected\nautomatically on the NEXT run.\n\nNeeds a classic PAT with repo scope.\nFine-grained PATs do NOT support secrets API." \
-                    12 58
+                  local sname sval
+                  sname=$(dialog --clear --inputbox "Secret name:" 8 52 3>&1 1>&2 2>&3)
+                  if [ -n "$sname" ]; then
+                    sval=$(_read_multiline "Custom Secret: $sname" "  Paste the value below.")
+                    if [ -n "$sval" ] && _confirm_secret "$sname" "$sval"; then
+                      hub_push_secret "$sname" "$sval"
+                    fi
+                  fi
                   ;;
-                6) return ;;
+                6)
+                  dialog --msgbox \
+                    "Secrets are encrypted with LibSodium and pushed\nto GitHub via REST API. They are injected\nautomatically on the NEXT run.\n\nNeeds a classic PAT with repo scope.\nFine-grained PATs do NOT support secrets API.\n\nFor JSON blobs: paste the full file content.\nCtrl+D on a blank line finishes input." \
+                    14 58
+                  ;;
+                7) return ;;
               esac
             done
           }
@@ -390,6 +453,9 @@ jobs:
             printf '|  cdw           -> jump to this repo root            |\n'
             printf '|  go [name]     -> switch to another repo            |\n'
             printf '|  save [msg]    -> git add + commit + push           |\n'
+            printf '|  override [m]  -> force push (--allow-empty)        |\n'
+            printf '|  commit [msg]  -> commit all my repos               |\n'
+            printf '|  gcommit [msg] -> commit all repos (all users)      |\n'
             printf '|  secrets       -> manage GitHub secrets             |\n'
             printf '|  links         -> show SSH / browser links          |\n'
             printf '|  hub           -> back to main menu                 |\n'
@@ -463,6 +529,69 @@ jobs:
             dialog --msgbox "Save complete:\n\n${results:-No repos found.}" 14 58
           }
 
+          _reauth_account() {
+            local acc="$1"
+            local secret_name="$2"
+            while true; do
+              clear
+              printf '+----------------------------------------------------------+\n'
+              printf '|  Reauth: %s -> %s\n' "$acc" "$secret_name"
+              printf '+----------------------------------------------------------+\n'
+              printf '  A URL and QR code will appear below.\n'
+              printf '  Open the URL in your browser and log in.\n'
+              printf '  This terminal will wait. Press Ctrl+C to cancel.\n\n'
+              qwen-proxy auth add "$acc"
+              local result=$?
+              echo ""
+              if [ $result -eq 0 ]; then
+                local creds_file="$HOME/.qwen/oauth_creds_${acc}.json"
+                if [ -f "$creds_file" ]; then
+                  local creds
+                  creds=$(cat "$creds_file")
+                  if dialog --yesno \
+                    "Auth for $acc succeeded!\n\nPush new credentials to GitHub secret '$secret_name'?\nThis saves them for the next workflow run." \
+                    10 60; then
+                    hub_push_secret "$secret_name" "$creds"
+                  fi
+                else
+                  dialog --msgbox "Auth reported success but cred file not found:\n$creds_file" 8 60
+                fi
+                break
+              else
+                if dialog --yesno "Auth for $acc failed or was cancelled.\nRetry?" 7 44; then
+                  continue
+                else
+                  break
+                fi
+              fi
+            done
+          }
+
+          _menu_reauth() {
+            local SELECTED
+            SELECTED=$(dialog --clear --title "Reauth Proxy Accounts" \
+              --checklist "Select accounts to re-authenticate:" 12 58 3 \
+              "acc1" "Account 1  (saves to CACHE_BLOB)" "on" \
+              "acc2" "Account 2  (saves to CACHE_BLOB_2)" "on" \
+              3>&1 1>&2 2>&3) || return
+
+            SELECTED=$(printf '%s' "$SELECTED" | tr -d '"' | tr ' ' '\n' | grep -v '^$')
+
+            if [ -z "$SELECTED" ]; then
+              dialog --msgbox "No accounts selected." 5 32
+              return
+            fi
+
+            while IFS= read -r acc; do
+              [ -z "$acc" ] && continue
+              local secret_name="CACHE_BLOB"
+              [ "$acc" = "acc2" ] && secret_name="CACHE_BLOB_2"
+              _reauth_account "$acc" "$secret_name"
+            done <<< "$SELECTED"
+
+            dialog --msgbox "Reauth complete.\nProxy will use new credentials on next request." 8 52
+          }
+
           hub_ensure_window "$CURRENT_USER"
 
           while true; do
@@ -470,18 +599,19 @@ jobs:
             CHOICE=$(dialog --clear \
               --title "Cloud Hub OS  |  $SESSION_LABEL" \
               --menu "User: $CURRENT_USER  |  $(date '+%a %H:%M')  |  type 'hub' anytime to return" \
-              22 66 9 \
-              1 "Select / Clone Repository" \
-              2 "Switch / Add User" \
-              3 "Manage GitHub Secrets" \
-              4 "Save All Open Repos" \
-              5 "Show Access Links" \
-              6 "Tmux Window List" \
-              7 "Proxy Status and Models" \
-              8 "Drop to Shell" \
-              9 "Exit Hub" \
+              24 66 10 \
+              1  "Select / Clone Repository" \
+              2  "Switch / Add User" \
+              3  "Manage GitHub Secrets" \
+              4  "Save All Open Repos" \
+              5  "Show Access Links" \
+              6  "Tmux Window List" \
+              7  "Proxy Status and Models" \
+              8  "Reauth Proxy Accounts" \
+              9  "Drop to Shell" \
+              10 "Exit Hub" \
               3>&1 1>&2 2>&3)
-            [ $? -ne 0 ] && CHOICE=8
+            [ $? -ne 0 ] && CHOICE=9
             case "$CHOICE" in
               1) _menu_repos ;;
               2) _menu_users ;;
@@ -500,19 +630,31 @@ jobs:
                 ;;
               7)
                 clear
-                echo "Proxy: $PROXY_URL"
+                echo "=== Proxy Current Status ==="
                 if hub_proxy_alive; then
-                  echo "Proxy is up"
+                  echo "Running: YES  ($PROXY_URL/v1)"
                   echo ""
-                  echo "Available models:"
+                  echo "Models:"
                   hub_proxy_models | sed 's/^/  - /'
+                  echo ""
+                  echo "Account status (from proxy log):"
+                  hub_proxy_account_status | sed 's/^/  /'
+                  if hub_proxy_any_invalid; then
+                    echo ""
+                    echo "WARNING: One or more accounts are INVALID."
+                    echo "         Use option 8 (Reauth Proxy Accounts) to fix."
+                  fi
                 else
-                  echo "Proxy not responding"
+                  echo "Running: NO  (proxy not responding at $PROXY_URL)"
                 fi
+                echo ""
+                echo "=== Recent Proxy Log ==="
+                tail -25 ~/proxy.log 2>/dev/null || echo "(no proxy log found)"
                 echo ""
                 read -rp "Press Enter to return to menu..." _dummy
                 ;;
-              8)
+              8) _menu_reauth ;;
+              9)
                 clear
                 cat << 'SHELLTIP'
           +----------------------------------------------------------------+
@@ -520,27 +662,24 @@ jobs:
           |  cdw           -> cd to current repo root                     |
           |  go [name]     -> switch repos (fuzzy or picker)              |
           |  save [msg]    -> commit and push current repo                |
+          |  override [m]  -> force push current repo (--allow-empty)     |
+          |  commit [msg]  -> commit all repos for current user           |
+          |  gcommit [msg] -> commit all repos for all users              |
           |  secrets       -> push secrets to GitHub                      |
           |  links         -> show SSH / browser access links             |
           |  hub           -> back to main menu                           |
           |                                                                |
-          |  Tmux keys:                                                    |
-          |  Ctrl+B c      new window                                     |
-          |  Ctrl+B n/p    next / previous window                         |
-          |  Ctrl+B 1-9    jump to window number                          |
-          |  Ctrl+B d      detach -- session stays alive!                 |
-          |                                                                |
-          |  Scroll (Termux / SSH):                                        |
-          |  Ctrl+B [      enter copy/scroll mode                         |
+          |  Tmux scroll:                                                  |
+          |  Ctrl+B [      enter scroll/copy mode                         |
           |  Arrow keys    scroll line by line                            |
           |  PgUp / PgDn   scroll page by page                           |
           |  q             exit scroll mode                               |
-          |  Mouse drag    scroll if mouse is on (two-finger in Termux)  |
+          |  Two-finger swipe works in Termux with mouse on               |
           +----------------------------------------------------------------+
           SHELLTIP
                 break
                 ;;
-              9)
+              10)
                 clear
                 echo "Session stays alive in background."
                 exit 0
@@ -596,7 +735,7 @@ jobs:
           source /usr/local/lib/hubos/lib.sh
           TARGET="${HUB_REPO_OVERRIDE:-$(hub_current_repo)}"
           TARGET="${TARGET:-$(pwd)}"
-          MSG="${1:-Cloud session save $(date -u '+%Y-%m-%d %H:%M UTC')}"
+          MSG="${*:-Cloud session save $(date -u '+%Y-%m-%d %H:%M UTC')}"
           if [ ! -d "$TARGET/.git" ]; then
             printf 'No git repo at: %s\n' "$TARGET"
             printf 'Use "go <n>" or "cdw" to navigate to a repo first.\n'
@@ -615,6 +754,56 @@ jobs:
           fi
           SAVEEOF
           sudo chmod +x /usr/local/bin/save
+
+          sudo tee /usr/local/bin/override > /dev/null << 'OVEOF'
+          #!/bin/bash
+          source /usr/local/lib/hubos/lib.sh
+          TARGET="$(hub_current_repo)"
+          TARGET="${TARGET:-$(pwd)}"
+          MSG="${*:-Override commit $(date -u '+%Y-%m-%d %H:%M UTC')}"
+          if [ ! -d "$TARGET/.git" ]; then
+            printf 'No git repo at: %s\n' "$TARGET"
+            exit 1
+          fi
+          USER="$(hub_active_user)"
+          cd "$TARGET" || exit 1
+          git config user.name  "$USER"
+          git config user.email "$(hub_user_email "$USER")"
+          git add -A
+          git commit --allow-empty -m "$MSG"
+          git push --force
+          printf 'Force pushed: %s\n' "$TARGET"
+          OVEOF
+          sudo chmod +x /usr/local/bin/override
+
+          sudo tee /usr/local/bin/commit > /dev/null << 'COMMITEOF'
+          #!/bin/bash
+          source /usr/local/lib/hubos/lib.sh
+          USER="$(hub_active_user)"
+          MSG="${*:-Manual commit $(date -u '+%Y-%m-%d %H:%M UTC')}"
+          printf 'Committing all repos for user: %s\n' "$USER"
+          for repo_dir in "$WORKSPACES/$USER"/*/; do
+            [ -d "$repo_dir/.git" ] || continue
+            hub_save_repo "$repo_dir" "$MSG" "$USER"
+          done
+          COMMITEOF
+          sudo chmod +x /usr/local/bin/commit
+
+          sudo tee /usr/local/bin/gcommit > /dev/null << 'GCOMMITEOF'
+          #!/bin/bash
+          source /usr/local/lib/hubos/lib.sh
+          MSG="${*:-Global commit $(date -u '+%Y-%m-%d %H:%M UTC')}"
+          printf 'Global commit across all users\n'
+          for user_dir in "$WORKSPACES"/*/; do
+            [ -d "$user_dir" ] || continue
+            USER="$(basename "$user_dir")"
+            for repo_dir in "$user_dir"*/; do
+              [ -d "$repo_dir/.git" ] || continue
+              hub_save_repo "$repo_dir" "$MSG" "$USER"
+            done
+          done
+          GCOMMITEOF
+          sudo chmod +x /usr/local/bin/gcommit
 
           sudo tee /usr/local/bin/secrets > /dev/null << 'SECEOF'
           #!/bin/bash
@@ -782,6 +971,9 @@ jobs:
             curl -sf http://localhost:8080/v1/models \
               | jq -r '.data[].id' 2>/dev/null | sed 's/^/  - /' \
               || echo "  (could not parse model list)"
+            echo ""
+            echo "Account status:"
+            grep -E 'acc[0-9]+:' ~/proxy.log | tail -5 | sed 's/^/  /'
           else
             echo ""
             echo "WARNING: Qwen proxy did not respond after 6 attempts."
@@ -797,14 +989,13 @@ jobs:
           REPO="${{ github.repository }}"
           SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
           SESSION_START=$(date +%s)
-          SHUTDOWN_FLAG="/tmp/hub_shutdown"
 
           source /usr/local/lib/hubos/lib.sh
 
           log() {
             local level="$1"
             shift
-            printf '[%s] [%-8s] %s\n' "$(date -u '+%H:%M:%S')" "$level" "$*"
+            printf '[%s] [%-9s] %s\n' "$(date -u '+%H:%M:%S')" "$level" "$*"
           }
 
           cat >> ~/.bashrc << ENVEOF
@@ -826,7 +1017,10 @@ jobs:
           tmux select-window -t "$TMUX_SESSION:monitor"
 
           _start_tmate() {
-            tmate -S /tmp/tmate.sock new-session -d -s "tmate-bridge" 2>/dev/null || true
+            rm -f /tmp/tmate.sock
+            tmate -S /tmp/tmate.sock \
+              new-session -d -s "tmate-bridge" \
+              "while true; do tmux attach-session -t $TMUX_SESSION 2>/dev/null; sleep 1; done"
             tmate -S /tmp/tmate.sock wait tmate-ready 2>/dev/null || true
             sleep 3
             local ssh web
@@ -839,10 +1033,25 @@ jobs:
             fi
             printf '%s' "$ssh" > "$HUB_CONF/tmate_ssh"
             printf '%s' "$web" > "$HUB_CONF/tmate_web"
-            tmate -S /tmp/tmate.sock send-keys -t "tmate-bridge" \
-              "while true; do tmux attach-session -t $TMUX_SESSION 2>/dev/null; sleep 1; done" \
-              Enter 2>/dev/null || true
             echo "$ssh"
+          }
+
+          _compute_shutdown_at() {
+            local total_files=0
+            for user_dir in "$WORKSPACES"/*/; do
+              [ -d "$user_dir" ] || continue
+              for repo_dir in "$user_dir"*/; do
+                [ -d "$repo_dir/.git" ] || continue
+                local n
+                n=$(git -C "$repo_dir" diff --name-only HEAD 2>/dev/null | wc -l)
+                total_files=$((total_files + n))
+              done
+            done
+            local extra=$(( total_files / 20 * 60 ))
+            [ $extra -gt 1200 ] && extra=1200
+            local buffer=$((600 + extra))
+            local job_end=$(( SESSION_START + 22200 ))
+            echo $(( job_end - buffer ))
           }
 
           TMATE_SSH=$(_start_tmate)
@@ -868,38 +1077,28 @@ jobs:
 
           printf '%s' "${CF_URL:-unavailable}" > "$HUB_CONF/cf_web"
 
+          SHUTDOWN_AT=$(_compute_shutdown_at)
+
           log "START" "Session: $SESSION_LABEL | Actor: $ACTOR | Repo: $REPO"
-          log "START" "Job timeout: 370min | Graceful shutdown at: 355min"
+          log "START" "Job limit: 370min | Graceful shutdown computed dynamically"
           log "LINK" "SSH  : $TMATE_SSH"
           log "LINK" "WEB  : $TMATE_WEB"
           log "LINK" "TTYD : ${CF_URL:-check cf.log}"
           log "INFO" "Termux: pkg install openssh && $TMATE_SSH"
-          log "INFO" "Tmux: Ctrl+B [ = scroll mode | q = exit scroll | Ctrl+B d = detach"
+          log "INFO" "Scroll: Ctrl+B [  then arrows/PgUp/PgDn  then q to exit"
+          log "INFO" "Note: press q on tmate status screen to proceed to hub"
           echo ""
 
           (
-            sleep 21300
-            touch "$SHUTDOWN_FLAG"
-          ) &
-          TIMER_PID=$!
-
-          (
-            sleep 60
             while true; do
-              if [ -f "$SHUTDOWN_FLAG" ]; then
-                break
-              fi
+              sleep 60
               if ! tmate -S /tmp/tmate.sock ls >/dev/null 2>&1; then
                 log "TMATE" "Socket lost -- restarting tmate..."
-                rm -f /tmp/tmate.sock
                 NEW_SSH=$(_start_tmate)
                 NEW_WEB=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "unavailable")
-                log "TMATE" "Reconnected. SSH : $NEW_SSH"
-                log "TMATE" "Reconnected. WEB : $NEW_WEB"
-                TMATE_SSH="$NEW_SSH"
-                TMATE_WEB="$NEW_WEB"
+                log "TMATE" "New SSH : $NEW_SSH"
+                log "TMATE" "New WEB : $NEW_WEB"
               fi
-              sleep 60
             done
           ) &
           WATCHER_PID=$!
@@ -908,10 +1107,11 @@ jobs:
           TIMER=0
 
           while true; do
-            if [ -f "$SHUTDOWN_FLAG" ]; then
-              log "SHUTDOWN" "355min reached -- initiating graceful shutdown"
-              log "SHUTDOWN" "SSH : $TMATE_SSH"
-              log "SHUTDOWN" "WEB : ${CF_URL:-check cf.log}"
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$SHUTDOWN_AT" ]; then
+              log "SHUTDOWN" "Graceful shutdown: time limit reached"
+              log "SHUTDOWN" "SSH was: $TMATE_SSH"
+              log "SHUTDOWN" "WEB was: ${CF_URL:-check cf.log}"
               kill $WATCHER_PID 2>/dev/null
               break
             fi
@@ -929,12 +1129,16 @@ jobs:
             fi
 
             if [ "$TIMER" -ge 900 ]; then
-              UPTIME_MIN=$(( ( $(date +%s) - SESSION_START ) / 60 ))
+              UPTIME_MIN=$(( (NOW - SESSION_START) / 60 ))
+              MINS_LEFT=$(( (SHUTDOWN_AT - NOW) / 60 ))
               PROXY_STATUS="down"
               hub_proxy_alive && PROXY_STATUS="up"
-              log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | clients: $CLIENTS | proxy: $PROXY_STATUS"
+              SHUTDOWN_AT=$(_compute_shutdown_at)
+              log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | left: ~${MINS_LEFT}min | clients: $CLIENTS | proxy: $PROXY_STATUS"
               log "HEARTBEAT" "SSH: $TMATE_SSH"
-              log "HEARTBEAT" "WEB: ${CF_URL:-check cf.log}"
+              if hub_proxy_any_invalid; then
+                log "WARN" "One or more proxy accounts INVALID -- use hub option 8 to reauth"
+              fi
               TIMER=0
             fi
 
@@ -942,7 +1146,6 @@ jobs:
             TIMER=$((TIMER + 5))
           done
 
-          kill $TIMER_PID 2>/dev/null
           log "END" "Watchtower exited -- auto-save step will run next"
 
       - name: Auto-Save All Repos on Exit

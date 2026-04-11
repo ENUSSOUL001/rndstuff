@@ -8,6 +8,20 @@ on:
         required: false
         default: 'Cloud Hub OS'
         type: string
+      auto_commit:
+        description: 'Auto-commit repos during session'
+        required: false
+        default: 'off'
+        type: choice
+        options:
+          - 'off'
+          - 'user-repos'
+          - 'global'
+      auto_commit_interval:
+        description: 'Auto-commit interval in minutes'
+        required: false
+        default: '30'
+        type: string
 
 jobs:
   cloud-os:
@@ -43,7 +57,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             clang \
-            tmate \
             tmux \
             dialog \
             jq \
@@ -70,6 +83,16 @@ jobs:
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
             -o /tmp/cloudflared.deb
           sudo dpkg -i /tmp/cloudflared.deb
+
+      - name: Install Upterm
+        run: |
+          UPTERM_VER=$(curl -sf https://api.github.com/repos/owenthereal/upterm/releases/latest \
+            | jq -r '.tag_name')
+          wget -qO /tmp/upterm.tar.gz \
+            "https://github.com/owenthereal/upterm/releases/download/${UPTERM_VER}/upterm_linux_amd64.tar.gz"
+          tar -xzf /tmp/upterm.tar.gz -C /tmp upterm
+          sudo install /tmp/upterm /usr/local/bin/upterm
+          upterm version
 
       - name: Install Qwen Proxy
         run: |
@@ -124,51 +147,33 @@ jobs:
               || ls -1t "$USERS_DIR" 2>/dev/null | head -n1 \
               || echo "default"
           }
-
-          hub_set_user() {
-            echo "$1" > "$HUB_CONF/active_user"
-          }
-
+          hub_set_user() { echo "$1" > "$HUB_CONF/active_user"; }
           hub_user_pat() {
             local u="${1:-$(hub_active_user)}"
             cat "$USERS_DIR/$u/pat" 2>/dev/null
           }
-
           hub_user_email() {
             local u="${1:-$(hub_active_user)}"
             cat "$USERS_DIR/$u/email" 2>/dev/null || echo "${u}@cloud.local"
           }
-
-          hub_current_repo() {
-            cat "$HUB_CONF/current_repo" 2>/dev/null
-          }
-
-          hub_set_repo() {
-            echo "$1" > "$HUB_CONF/current_repo"
-          }
-
+          hub_current_repo() { cat "$HUB_CONF/current_repo" 2>/dev/null; }
+          hub_set_repo() { echo "$1" > "$HUB_CONF/current_repo"; }
           hub_github_repo() {
             echo "${GITHUB_REPOSITORY:-$(cat "$HUB_CONF/github_repo" 2>/dev/null)}"
           }
-
           hub_proxy_models() {
             curl -sf "$PROXY_URL/v1/models" 2>/dev/null \
-              | jq -r '.data[].id' 2>/dev/null \
-              || echo ""
+              | jq -r '.data[].id' 2>/dev/null || echo ""
           }
-
           hub_proxy_alive() {
             curl -sf "$PROXY_URL/v1/models" >/dev/null 2>&1
           }
-
           hub_proxy_account_status() {
             grep -E 'acc[0-9]+:' ~/proxy.log 2>/dev/null | tail -5
           }
-
           hub_proxy_any_invalid() {
             grep -qiE 'acc[0-9]+: *(invalid|expired)' ~/proxy.log 2>/dev/null
           }
-
           hub_write_hermes_config() {
             local profile_dir="$1"
             mkdir -p "$profile_dir"
@@ -195,22 +200,12 @@ jobs:
           CFGEOF
             printf 'OPENAI_API_KEY=sk-qwen-proxy-local\n' > "$profile_dir/.env"
           }
-
           hub_push_secret() {
             local sname="$1" sval="$2" pat="${3:-$(hub_user_pat)}" repo
             repo="$(hub_github_repo)"
-            if [ -z "$pat" ]; then
-              dialog --msgbox "ERROR: No PAT found for current user." 7 52
-              return 1
-            fi
-            if [ -z "$repo" ]; then
-              dialog --msgbox "ERROR: GitHub repo not set." 7 52
-              return 1
-            fi
-            if [ -z "$sname" ] || [ -z "$sval" ]; then
-              dialog --msgbox "ERROR: Secret name or value is empty." 5 45
-              return 1
-            fi
+            if [ -z "$pat" ]; then dialog --msgbox "ERROR: No PAT found for current user." 7 52; return 1; fi
+            if [ -z "$repo" ]; then dialog --msgbox "ERROR: GitHub repo not set." 7 52; return 1; fi
+            if [ -z "$sname" ] || [ -z "$sval" ]; then dialog --msgbox "ERROR: Name or value empty." 5 45; return 1; fi
             local pk_json
             pk_json=$(curl -sf \
               -H "Authorization: Bearer $pat" \
@@ -218,17 +213,13 @@ jobs:
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/$repo/actions/secrets/public-key" 2>/dev/null)
             if [ -z "$pk_json" ] || [ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
-              dialog --msgbox "ERROR: Could not fetch repo public key.\nCheck PAT has repo scope." 7 58
-              return 1
+              dialog --msgbox "ERROR: Could not fetch public key.\nCheck PAT has repo scope." 7 58; return 1
             fi
             local key_id key_val encrypted http_code
             key_id=$(echo "$pk_json" | jq -r '.key_id')
             key_val=$(echo "$pk_json" | jq -r '.key')
             encrypted=$(python3 /usr/local/bin/hub_encrypt.py "$key_val" "$sval" 2>/dev/null)
-            if [ -z "$encrypted" ]; then
-              dialog --msgbox "ERROR: Encryption failed." 7 52
-              return 1
-            fi
+            if [ -z "$encrypted" ]; then dialog --msgbox "ERROR: Encryption failed." 7 52; return 1; fi
             http_code=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
               -H "Authorization: Bearer $pat" \
               -H "Accept: application/vnd.github+json" \
@@ -237,12 +228,11 @@ jobs:
               -d "{\"encrypted_value\":\"$encrypted\",\"key_id\":\"$key_id\"}" 2>/dev/null) || true
             case "$http_code" in
               201|204) dialog --msgbox "Secret '$sname' saved!\nAvailable on the NEXT run." 8 52 ;;
-              401|403) dialog --msgbox "ERROR $http_code: Permission denied.\nPAT needs repo scope (classic PAT)." 7 58 ;;
+              401|403) dialog --msgbox "ERROR $http_code: Permission denied.\nNeeds classic PAT with repo scope." 7 58 ;;
               404)     dialog --msgbox "ERROR 404: Repo '$repo' not found." 7 52 ;;
               *)       dialog --msgbox "ERROR: API returned HTTP $http_code." 6 52 ;;
             esac
           }
-
           hub_save_repo() {
             local repo_path="$1"
             local msg="${2:-Cloud session sync $(date -u '+%Y-%m-%d %H:%M UTC')}"
@@ -260,7 +250,6 @@ jobs:
               fi
             ) 2>&1
           }
-
           hub_ensure_window() {
             local user="${1:-$(hub_active_user)}"
             local win_name="u-${user}"
@@ -273,22 +262,19 @@ jobs:
               fi
             fi
           }
-
           hub_print_links() {
-            local tmate_ssh tmate_web cf_web
-            tmate_ssh=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "not ready")
-            tmate_web=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "not ready")
+            local upterm_ssh cf_web
+            upterm_ssh=$(cat "$HUB_CONF/upterm_ssh" 2>/dev/null || echo "not ready")
             cf_web=$(cat "$HUB_CONF/cf_web" 2>/dev/null || echo "not ready")
             printf '\n'
-            printf '  +--------------------------------------------------------------+\n'
-            printf '  |  SSH  (Termux / iOS / Mac / Windows / Linux):               |\n'
-            printf '  |  %s\n' "$tmate_ssh"
-            printf '  |  WEB  (tmate browser terminal):                             |\n'
-            printf '  |  %s\n' "$tmate_web"
-            printf '  |  WEB  (ttyd via Cloudflare):                                |\n'
+            printf '  +----------------------------------------------------------------+\n'
+            printf '  |  SSH  (Termux / iOS / Mac / Windows / Linux, no extra tools): |\n'
+            printf '  |  %s\n' "$upterm_ssh"
+            printf '  |  Termux one-liner: pkg install openssh && %s\n' "$upterm_ssh"
+            printf '  |                                                                |\n'
+            printf '  |  WEB  (ttyd via Cloudflare, any browser):                    |\n'
             printf '  |  %s\n' "$cf_web"
-            printf '  |  Termux: pkg install openssh && %s\n' "$tmate_ssh"
-            printf '  +--------------------------------------------------------------+\n'
+            printf '  +----------------------------------------------------------------+\n'
             printf '\n'
           }
           LIBEOF
@@ -302,23 +288,23 @@ jobs:
           CURRENT_USER="$(hub_active_user)"
 
           _read_multiline() {
-            local prompt_title="$1"
-            local prompt_body="$2"
+            local title="$1" hint="$2"
             clear
             printf '+----------------------------------------------------------+\n'
-            printf '|  %s\n' "$prompt_title"
+            printf '|  %s\n' "$title"
             printf '+----------------------------------------------------------+\n'
-            printf '%s\n' "$prompt_body"
-            printf '\n  Paste below. Press Enter then Ctrl+D on a blank line when done.\n\n'
+            printf '%s\n\n' "$hint"
+            printf '  Paste below. Press Enter, then Ctrl+D on a blank line when done.\n\n'
             cat
           }
 
           _confirm_secret() {
-            local name="$1"
-            local value="$2"
+            local name="$1" value="$2"
             local preview="${value:0:80}"
             local len="${#value}"
-            dialog --yesno "Confirm push secret: $name\n\nPreview (first 80 chars):\n$preview\n\nTotal length: $len chars\n\nProceed?" 14 66
+            dialog --yesno \
+              "Confirm push: $name\n\nPreview (first 80 chars):\n$preview\n\nTotal: $len chars\n\nProceed?" \
+              14 66
           }
 
           _menu_secrets() {
@@ -328,8 +314,8 @@ jobs:
               SCHOICE=$(dialog --clear --title "Secret Manager" \
                 --menu "Repo: ${REPO:-not set}" 20 66 7 \
                 1 "Save PAT -> GH_SYNC_TOKEN" \
-                2 "Save Qwen blob 1 -> CACHE_BLOB (JSON, multiline)" \
-                3 "Save Qwen blob 2 -> CACHE_BLOB_2 (JSON, multiline)" \
+                2 "Save Qwen blob 1 -> CACHE_BLOB (paste JSON)" \
+                3 "Save Qwen blob 2 -> CACHE_BLOB_2 (paste JSON)" \
                 4 "Push a custom secret (single line)" \
                 5 "Push a custom secret (multiline / JSON)" \
                 6 "How does this work?" \
@@ -337,11 +323,10 @@ jobs:
                 3>&1 1>&2 2>&3) || return
               case "$SCHOICE" in
                 1)
-                  local v
+                  local v confirm
                   v=$(dialog --clear --passwordbox \
                     "GitHub PAT (classic, repo+workflow scope):" 9 58 3>&1 1>&2 2>&3)
                   if [ -n "$v" ]; then
-                    local confirm
                     confirm=$(dialog --clear --passwordbox \
                       "Confirm PAT (type again):" 9 58 3>&1 1>&2 2>&3)
                     if [ "$v" = "$confirm" ]; then
@@ -368,13 +353,12 @@ jobs:
                   fi
                   ;;
                 4)
-                  local sname sval
+                  local sname sval confirm
                   sname=$(dialog --clear --inputbox "Secret name (e.g. MY_API_KEY):" 8 52 3>&1 1>&2 2>&3)
                   if [ -n "$sname" ]; then
                     sval=$(dialog --clear --passwordbox "Secret value:" 8 52 3>&1 1>&2 2>&3)
                     if [ -n "$sval" ]; then
-                      local confirm
-                      confirm=$(dialog --clear --passwordbox "Confirm secret value:" 8 52 3>&1 1>&2 2>&3)
+                      confirm=$(dialog --clear --passwordbox "Confirm value:" 8 52 3>&1 1>&2 2>&3)
                       if [ "$sval" = "$confirm" ]; then
                         hub_push_secret "$sname" "$sval"
                       else
@@ -387,7 +371,7 @@ jobs:
                   local sname sval
                   sname=$(dialog --clear --inputbox "Secret name:" 8 52 3>&1 1>&2 2>&3)
                   if [ -n "$sname" ]; then
-                    sval=$(_read_multiline "Custom Secret: $sname" "  Paste the value below.")
+                    sval=$(_read_multiline "Custom: $sname" "  Paste the value below.")
                     if [ -n "$sval" ] && _confirm_secret "$sname" "$sval"; then
                       hub_push_secret "$sname" "$sval"
                     fi
@@ -395,8 +379,8 @@ jobs:
                   ;;
                 6)
                   dialog --msgbox \
-                    "Secrets are encrypted with LibSodium and pushed\nto GitHub via REST API. They are injected\nautomatically on the NEXT run.\n\nNeeds a classic PAT with repo scope.\nFine-grained PATs do NOT support secrets API.\n\nFor JSON blobs: paste the full file content.\nCtrl+D on a blank line finishes input." \
-                    14 58
+                    "Secrets are encrypted with LibSodium and pushed\nto GitHub via REST API.\n\nAvailable automatically on the NEXT run.\nNeeds a classic PAT with repo scope.\nFine-grained PATs do NOT support secrets API.\n\nFor JSON blobs: paste full content.\nCtrl+D on a blank line finishes input." \
+                    14 60
                   ;;
                 7) return ;;
               esac
@@ -418,13 +402,11 @@ jobs:
               "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator" \
               | jq -r '.[].full_name' 2>/dev/null)
             if [ -z "$REPOS" ]; then
-              dialog --msgbox "Failed to fetch repos.\nCheck that PAT has repo scope and is valid." 7 52
+              dialog --msgbox "Failed to fetch repos.\nCheck PAT has repo scope and is valid." 7 52
               return
             fi
             local OPTS=()
-            while IFS= read -r r; do
-              OPTS+=("$r" "->")
-            done <<< "$REPOS"
+            while IFS= read -r r; do OPTS+=("$r" "->"); done <<< "$REPOS"
             local REPO_CHOICE
             REPO_CHOICE=$(dialog --clear --title "Your Repositories" \
               --menu "Select to clone or open:" 24 66 16 \
@@ -445,21 +427,22 @@ jobs:
             hub_set_repo "$REPO_DIR"
             clear
             printf '\e[1;32m'
-            printf '+------------------------------------------------------+\n'
-            printf '|  Connected: %-38s |\n' "$SHORT"
-            printf '|  Path:      %-38s |\n' "$REPO_DIR"
-            printf '+------------------------------------------------------+\n'
-            printf '|  h             -> Hermes AI (runs in this dir)      |\n'
-            printf '|  cdw           -> jump to this repo root            |\n'
-            printf '|  go [name]     -> switch to another repo            |\n'
-            printf '|  save [msg]    -> git add + commit + push           |\n'
-            printf '|  override [m]  -> force push (--allow-empty)        |\n'
-            printf '|  commit [msg]  -> commit all my repos               |\n'
-            printf '|  gcommit [msg] -> commit all repos (all users)      |\n'
-            printf '|  secrets       -> manage GitHub secrets             |\n'
-            printf '|  links         -> show SSH / browser links          |\n'
-            printf '|  hub           -> back to main menu                 |\n'
-            printf '+------------------------------------------------------+\n'
+            printf '+----------------------------------------------------------+\n'
+            printf '|  Connected: %-42s |\n' "$SHORT"
+            printf '|  Path:      %-42s |\n' "$REPO_DIR"
+            printf '+----------------------------------------------------------+\n'
+            printf '|  h             -> Hermes AI (runs in this dir)          |\n'
+            printf '|  cdw           -> jump to this repo root                |\n'
+            printf '|  go [name]     -> switch to another repo                |\n'
+            printf '|  save [msg]    -> commit + push this repo               |\n'
+            printf '|  override [m]  -> force push (--allow-empty)            |\n'
+            printf '|  commit [msg]  -> commit all repos (current user)       |\n'
+            printf '|  gcommit [msg] -> commit all repos (all users)          |\n'
+            printf '|  gsave [msg]   -> global save: repos + system state     |\n'
+            printf '|  secrets       -> manage GitHub secrets                 |\n'
+            printf '|  links         -> show SSH / browser links              |\n'
+            printf '|  hub           -> back to main menu                     |\n'
+            printf '+----------------------------------------------------------+\n'
             printf '\e[0m\n'
             bash --rcfile <(cat ~/.bashrc; echo "cd '$REPO_DIR'")
           }
@@ -480,20 +463,19 @@ jobs:
                 NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)
                 [ -z "$NEW_USER" ] && return
                 NEW_PAT=$(dialog --clear --passwordbox \
-                  "GitHub PAT (needs: repo + workflow scopes, classic PAT):" 10 54 3>&1 1>&2 2>&3)
+                  "GitHub PAT (repo + workflow scopes, classic PAT):" 10 54 3>&1 1>&2 2>&3)
                 [ -z "$NEW_PAT" ] && return
-                dialog --infobox "Verifying credentials with GitHub API..." 4 48
-                PROFILE=$(curl -sf \
-                  -H "Authorization: token $NEW_PAT" \
+                dialog --infobox "Verifying credentials..." 4 48
+                PROFILE=$(curl -sf -H "Authorization: token $NEW_PAT" \
                   https://api.github.com/user 2>/dev/null)
                 if [ -z "$PROFILE" ] || [ "$(echo "$PROFILE" | jq -r '.login // empty')" = "" ]; then
-                  dialog --msgbox "ERROR: Could not verify credentials.\nCheck the PAT is valid and not expired." 7 54
+                  dialog --msgbox "ERROR: Invalid credentials.\nCheck PAT is valid and not expired." 7 54
                   return
                 fi
                 NEW_EMAIL=$(echo "$PROFILE" | jq -r '.email // empty')
                 if [ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then
                   NEW_EMAIL=$(dialog --clear --inputbox \
-                    "Email not on public profile.\nEnter your git commit email:" 9 54 3>&1 1>&2 2>&3)
+                    "Email not public. Enter git commit email:" 9 54 3>&1 1>&2 2>&3)
                   [ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"
                 fi
                 mkdir -p "$USERS_DIR/$NEW_USER"
@@ -503,7 +485,7 @@ jobs:
                 hub_set_user "$CURRENT_USER"
                 hub_ensure_window "$CURRENT_USER"
                 if dialog --yesno \
-                  "User '$NEW_USER' added!\n\nSave this PAT as GH_SYNC_TOKEN in GitHub Secrets?\nMakes it available automatically on the next run." \
+                  "User '$NEW_USER' added!\n\nSave PAT as GH_SYNC_TOKEN in GitHub Secrets?\nMakes it available on the next run." \
                   10 58; then
                   hub_push_secret "GH_SYNC_TOKEN" "$NEW_PAT" "$NEW_PAT"
                 fi
@@ -530,8 +512,7 @@ jobs:
           }
 
           _reauth_account() {
-            local acc="$1"
-            local secret_name="$2"
+            local acc="$1" secret_name="$2"
             while true; do
               clear
               printf '+----------------------------------------------------------+\n'
@@ -539,7 +520,7 @@ jobs:
               printf '+----------------------------------------------------------+\n'
               printf '  A URL and QR code will appear below.\n'
               printf '  Open the URL in your browser and log in.\n'
-              printf '  This terminal will wait. Press Ctrl+C to cancel.\n\n'
+              printf '  Terminal waits. Press Ctrl+C to cancel.\n\n'
               qwen-proxy auth add "$acc"
               local result=$?
               echo ""
@@ -549,16 +530,16 @@ jobs:
                   local creds
                   creds=$(cat "$creds_file")
                   if dialog --yesno \
-                    "Auth for $acc succeeded!\n\nPush new credentials to GitHub secret '$secret_name'?\nThis saves them for the next workflow run." \
+                    "Auth for $acc succeeded!\n\nPush credentials to GitHub secret '$secret_name'?\nSaves them for the next workflow run." \
                     10 60; then
                     hub_push_secret "$secret_name" "$creds"
                   fi
                 else
-                  dialog --msgbox "Auth reported success but cred file not found:\n$creds_file" 8 60
+                  dialog --msgbox "Auth succeeded but cred file not found:\n$creds_file" 8 60
                 fi
                 break
               else
-                if dialog --yesno "Auth for $acc failed or was cancelled.\nRetry?" 7 44; then
+                if dialog --yesno "Auth for $acc failed or cancelled.\nRetry?" 7 44; then
                   continue
                 else
                   break
@@ -574,21 +555,17 @@ jobs:
               "acc1" "Account 1  (saves to CACHE_BLOB)" "on" \
               "acc2" "Account 2  (saves to CACHE_BLOB_2)" "on" \
               3>&1 1>&2 2>&3) || return
-
             SELECTED=$(printf '%s' "$SELECTED" | tr -d '"' | tr ' ' '\n' | grep -v '^$')
-
             if [ -z "$SELECTED" ]; then
               dialog --msgbox "No accounts selected." 5 32
               return
             fi
-
             while IFS= read -r acc; do
               [ -z "$acc" ] && continue
               local secret_name="CACHE_BLOB"
               [ "$acc" = "acc2" ] && secret_name="CACHE_BLOB_2"
               _reauth_account "$acc" "$secret_name"
             done <<< "$SELECTED"
-
             dialog --msgbox "Reauth complete.\nProxy will use new credentials on next request." 8 52
           }
 
@@ -596,39 +573,47 @@ jobs:
 
           while true; do
             CURRENT_USER="$(hub_active_user)"
+            hub_print_links
             CHOICE=$(dialog --clear \
               --title "Cloud Hub OS  |  $SESSION_LABEL" \
               --menu "User: $CURRENT_USER  |  $(date '+%a %H:%M')  |  type 'hub' anytime to return" \
-              24 66 10 \
+              26 66 11 \
               1  "Select / Clone Repository" \
               2  "Switch / Add User" \
               3  "Manage GitHub Secrets" \
               4  "Save All Open Repos" \
-              5  "Show Access Links" \
-              6  "Tmux Window List" \
-              7  "Proxy Status and Models" \
-              8  "Reauth Proxy Accounts" \
-              9  "Drop to Shell" \
-              10 "Exit Hub" \
+              5  "Global Save (repos + system state)" \
+              6  "Show Access Links" \
+              7  "Tmux Window List" \
+              8  "Proxy Status and Models" \
+              9  "Reauth Proxy Accounts" \
+              10 "Drop to Shell" \
+              11 "Exit Hub" \
               3>&1 1>&2 2>&3)
-            [ $? -ne 0 ] && CHOICE=9
+            [ $? -ne 0 ] && CHOICE=10
             case "$CHOICE" in
-              1) _menu_repos ;;
-              2) _menu_users ;;
-              3) _menu_secrets ;;
-              4) _save_all ;;
+              1)  _menu_repos ;;
+              2)  _menu_users ;;
+              3)  _menu_secrets ;;
+              4)  _save_all ;;
               5)
                 clear
-                hub_print_links
+                echo "Running global save..."
+                gsave "Manual global save $(date -u '+%Y-%m-%d %H:%M UTC')"
                 read -rp "Press Enter to return to menu..." _dummy
                 ;;
               6)
                 clear
-                tmux list-windows -t "$TMUX_SESSION" 2>/dev/null \
-                  || echo "(not attached to a tmux session)"
+                hub_print_links
                 read -rp "Press Enter to return to menu..." _dummy
                 ;;
               7)
+                clear
+                tmux list-windows -t "$TMUX_SESSION" 2>/dev/null \
+                  || echo "(not in a tmux session)"
+                read -rp "Press Enter to return to menu..." _dummy
+                ;;
+              8)
                 clear
                 echo "=== Proxy Current Status ==="
                 if hub_proxy_alive; then
@@ -637,49 +622,50 @@ jobs:
                   echo "Models:"
                   hub_proxy_models | sed 's/^/  - /'
                   echo ""
-                  echo "Account status (from proxy log):"
+                  echo "Account status:"
                   hub_proxy_account_status | sed 's/^/  /'
                   if hub_proxy_any_invalid; then
                     echo ""
                     echo "WARNING: One or more accounts are INVALID."
-                    echo "         Use option 8 (Reauth Proxy Accounts) to fix."
+                    echo "Use option 9 (Reauth Proxy Accounts) to fix."
                   fi
                 else
-                  echo "Running: NO  (proxy not responding at $PROXY_URL)"
+                  echo "Running: NO"
                 fi
                 echo ""
-                echo "=== Recent Proxy Log ==="
-                tail -25 ~/proxy.log 2>/dev/null || echo "(no proxy log found)"
+                echo "=== Recent Proxy Log (last 25 lines) ==="
+                tail -25 ~/proxy.log 2>/dev/null || echo "(no proxy log)"
                 echo ""
                 read -rp "Press Enter to return to menu..." _dummy
                 ;;
-              8) _menu_reauth ;;
-              9)
+              9)  _menu_reauth ;;
+              10)
                 clear
                 cat << 'SHELLTIP'
-          +----------------------------------------------------------------+
-          |  h             -> Hermes AI (runs in your current directory)  |
-          |  cdw           -> cd to current repo root                     |
-          |  go [name]     -> switch repos (fuzzy or picker)              |
-          |  save [msg]    -> commit and push current repo                |
-          |  override [m]  -> force push current repo (--allow-empty)     |
-          |  commit [msg]  -> commit all repos for current user           |
-          |  gcommit [msg] -> commit all repos for all users              |
-          |  secrets       -> push secrets to GitHub                      |
-          |  links         -> show SSH / browser access links             |
-          |  hub           -> back to main menu                           |
-          |                                                                |
-          |  Tmux scroll:                                                  |
-          |  Ctrl+B [      enter scroll/copy mode                         |
-          |  Arrow keys    scroll line by line                            |
-          |  PgUp / PgDn   scroll page by page                           |
-          |  q             exit scroll mode                               |
-          |  Two-finger swipe works in Termux with mouse on               |
-          +----------------------------------------------------------------+
+          +------------------------------------------------------------------+
+          |  h             -> Hermes AI (runs in your current directory)    |
+          |  cdw           -> cd to current repo root                       |
+          |  go [name]     -> switch repos (fuzzy or picker)                |
+          |  save [msg]    -> commit and push current repo                  |
+          |  override [m]  -> force push (--allow-empty)                    |
+          |  commit [msg]  -> commit all repos (current user)               |
+          |  gcommit [msg] -> commit all repos (all users)                  |
+          |  gsave [msg]   -> global save: repos + system state to branch   |
+          |  secrets       -> push secrets to GitHub                        |
+          |  links         -> show SSH / browser access links               |
+          |  hub           -> back to main menu                             |
+          |                                                                  |
+          |  Scroll in tmux (SSH or web terminal):                           |
+          |  Ctrl+B [      enter scroll mode                                |
+          |  Arrow keys    scroll line by line                              |
+          |  PgUp / PgDn   scroll page by page                             |
+          |  q             exit scroll mode                                 |
+          |  Two-finger swipe works in Termux with mouse on                 |
+          +------------------------------------------------------------------+
           SHELLTIP
                 break
                 ;;
-              10)
+              11)
                 clear
                 echo "Session stays alive in background."
                 exit 0
@@ -698,31 +684,25 @@ jobs:
 
           WORK_DIR="$PWD"
           REPO_NAME=$(basename "$WORK_DIR")
-
           BLOCKED="workspace workspaces runner home tmp"
           for _b in $BLOCKED; do
             if [ "$REPO_NAME" = "$_b" ]; then
-              printf 'ERROR: cd into a repository before launching Hermes.\n'
-              printf 'Current: %s\n' "$WORK_DIR"
-              printf 'Use: go <n>  or  cdw\n'
+              printf 'ERROR: cd into a repository first.\nCurrent: %s\nUse: go <n>  or  cdw\n' "$WORK_DIR"
               exit 1
             fi
           done
 
           if ! hub_proxy_alive; then
-            printf 'WARNING: Qwen proxy is not responding at %s\n' "$PROXY_URL"
-            printf 'Hermes will still launch, but API calls may fail.\n'
+            printf 'WARNING: Qwen proxy not responding at %s\n' "$PROXY_URL"
+            printf 'Hermes will launch but API calls may fail.\n'
           fi
 
           hub_write_hermes_config "$HOME/.hermes"
-
           export OPENAI_API_KEY="sk-qwen-proxy-local"
           export OPENAI_BASE_URL="$PROXY_URL/v1"
 
-          printf 'Hermes  |  repo: [%s]\n' "$REPO_NAME"
-          printf 'cwd:    %s\n' "$WORK_DIR"
-          printf 'proxy:  %s/v1\n' "$PROXY_URL"
-          printf '/exit or Ctrl+D to return to shell\n\n'
+          printf 'Hermes  |  repo: [%s]\ncwd:    %s\nproxy:  %s/v1\n/exit or Ctrl+D to return to shell\n\n' \
+            "$REPO_NAME" "$WORK_DIR" "$PROXY_URL"
 
           cd "$WORK_DIR" && exec hermes "$@"
           HEOF
@@ -737,9 +717,7 @@ jobs:
           TARGET="${TARGET:-$(pwd)}"
           MSG="${*:-Cloud session save $(date -u '+%Y-%m-%d %H:%M UTC')}"
           if [ ! -d "$TARGET/.git" ]; then
-            printf 'No git repo at: %s\n' "$TARGET"
-            printf 'Use "go <n>" or "cdw" to navigate to a repo first.\n'
-            exit 1
+            printf 'No git repo at: %s\nUse "go <n>" or "cdw" first.\n' "$TARGET"; exit 1
           fi
           USER="$(hub_active_user)"
           cd "$TARGET" || exit 1
@@ -749,8 +727,7 @@ jobs:
           if git diff-index --quiet HEAD 2>/dev/null; then
             printf 'Nothing new to commit in: %s\n' "$(basename "$TARGET")"
           else
-            git commit -m "$MSG" && git push \
-              && printf 'Saved and pushed: %s\n' "$TARGET"
+            git commit -m "$MSG" && git push && printf 'Saved and pushed: %s\n' "$TARGET"
           fi
           SAVEEOF
           sudo chmod +x /usr/local/bin/save
@@ -761,10 +738,7 @@ jobs:
           TARGET="$(hub_current_repo)"
           TARGET="${TARGET:-$(pwd)}"
           MSG="${*:-Override commit $(date -u '+%Y-%m-%d %H:%M UTC')}"
-          if [ ! -d "$TARGET/.git" ]; then
-            printf 'No git repo at: %s\n' "$TARGET"
-            exit 1
-          fi
+          if [ ! -d "$TARGET/.git" ]; then printf 'No git repo at: %s\n' "$TARGET"; exit 1; fi
           USER="$(hub_active_user)"
           cd "$TARGET" || exit 1
           git config user.name  "$USER"
@@ -805,6 +779,59 @@ jobs:
           GCOMMITEOF
           sudo chmod +x /usr/local/bin/gcommit
 
+          sudo tee /usr/local/bin/gsave > /dev/null << 'GSAVEEOF'
+          #!/bin/bash
+          source /usr/local/lib/hubos/lib.sh
+          MSG="${*:-Global save $(date -u '+%Y-%m-%d %H:%M UTC')}"
+          printf 'gsave: committing all repos and system state\n\n'
+
+          for user_dir in "$WORKSPACES"/*/; do
+            [ -d "$user_dir" ] || continue
+            USER="$(basename "$user_dir")"
+            for repo_dir in "$user_dir"*/; do
+              [ -d "$repo_dir/.git" ] || continue
+              hub_save_repo "$repo_dir" "$MSG" "$USER"
+            done
+          done
+
+          ACTOR="$(hub_active_user)"
+          PAT="$(hub_user_pat "$ACTOR")"
+          REPO="$(hub_github_repo)"
+
+          if [ -z "$PAT" ] || [ -z "$REPO" ]; then
+            printf 'Skipping system state: no PAT or repo configured\n'
+            exit 0
+          fi
+
+          STATE_DIR="$HOME/.hub-state"
+          mkdir -p "$STATE_DIR"
+          cd "$STATE_DIR" || exit 1
+
+          git init -q 2>/dev/null || true
+          git config user.name  "$ACTOR"
+          git config user.email "$(hub_user_email "$ACTOR")"
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "https://$ACTOR:$PAT@github.com/$REPO.git"
+
+          mkdir -p hermes custom-bin hubos
+          cp ~/.hermes/config.yaml hermes/ 2>/dev/null || true
+          cp ~/.hermes/.env hermes/ 2>/dev/null || true
+          cp -r ~/.hermes/skills hermes/ 2>/dev/null || true
+          cp ~/.bashrc . 2>/dev/null || true
+          cp ~/.tmux.conf . 2>/dev/null || true
+          for f in hub h save override commit gcommit gsave secrets links; do
+            cp "/usr/local/bin/$f" custom-bin/ 2>/dev/null || true
+          done
+          cp /usr/local/lib/hubos/lib.sh hubos/ 2>/dev/null || true
+
+          git add -A
+          git commit --allow-empty -m "System state: $MSG" \
+            && git push origin HEAD:hub-state --force \
+            && printf '  system state -> hub-state branch\n' \
+            || printf '  system state push failed (check PAT and repo access)\n'
+          GSAVEEOF
+          sudo chmod +x /usr/local/bin/gsave
+
           sudo tee /usr/local/bin/secrets > /dev/null << 'SECEOF'
           #!/bin/bash
           source /usr/local/lib/hubos/lib.sh
@@ -824,18 +851,9 @@ jobs:
               5 "Exit" \
               3>&1 1>&2 2>&3) || break
             case "$CHOICE" in
-              1)
-                v=$(dialog --clear --passwordbox "PAT value:" 8 50 3>&1 1>&2 2>&3)
-                [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v"
-                ;;
-              2)
-                v=$(dialog --clear --inputbox "CACHE_BLOB:" 10 60 3>&1 1>&2 2>&3)
-                [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v"
-                ;;
-              3)
-                v=$(dialog --clear --inputbox "CACHE_BLOB_2:" 10 60 3>&1 1>&2 2>&3)
-                [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v"
-                ;;
+              1) v=$(dialog --clear --passwordbox "PAT:" 8 50 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "GH_SYNC_TOKEN" "$v" ;;
+              2) v=$(dialog --clear --inputbox "CACHE_BLOB:" 10 60 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB" "$v" ;;
+              3) v=$(dialog --clear --inputbox "CACHE_BLOB_2:" 10 60 3>&1 1>&2 2>&3); [ -n "$v" ] && hub_push_secret "CACHE_BLOB_2" "$v" ;;
               4) _push_custom ;;
               5) break ;;
             esac
@@ -859,8 +877,7 @@ jobs:
             local REPO
             REPO="$(hub_current_repo)"
             if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
-              printf 'No repo set. Use hub -> Select Repository, or: go <n>\n'
-              return 1
+              printf 'No repo set. Use hub -> Select Repository, or: go <n>\n'; return 1
             fi
             cd "$REPO" && printf '%s\n' "$REPO"
           }
@@ -872,8 +889,8 @@ jobs:
             if [ -n "$1" ]; then
               TARGET=$(find "$WORKDIR" -maxdepth 1 -type d -name "*${1}*" 2>/dev/null | head -1)
               if [ -z "$TARGET" ]; then
-                printf 'No repo matching "%s" under %s\n' "$1" "$WORKDIR"
-                ls -1 "$WORKDIR" 2>/dev/null || printf '(none cloned yet -- use hub)\n'
+                printf 'No repo matching "%s"\n' "$1"
+                ls -1 "$WORKDIR" 2>/dev/null || printf '(none cloned yet)\n'
                 return 1
               fi
             else
@@ -881,8 +898,7 @@ jobs:
                 [ -d "$d/.git" ] && OPTS+=("$(basename "$d")" "-> $d")
               done < <(find "$WORKDIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
               if [ ${#OPTS[@]} -eq 0 ]; then
-                printf 'No local repos found. Clone one via hub (option 1).\n'
-                return 1
+                printf 'No local repos. Clone one via hub (option 1).\n'; return 1
               fi
               CHOICE=$(dialog --clear --title "Go To Repo" \
                 --menu "Select:" 20 64 14 "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
@@ -955,85 +971,71 @@ jobs:
           PROXY_OK=false
           for attempt in 1 2 3 4 5 6; do
             if curl -sf http://localhost:8080/v1/models >/dev/null 2>&1; then
-              PROXY_OK=true
-              break
+              PROXY_OK=true; break
             fi
             echo "Attempt $attempt: proxy not ready, waiting 5s..."
             sleep 5
-            echo "--- proxy.log tail ---"
-            tail -15 ~/proxy.log
-            echo "----------------------"
+            tail -10 ~/proxy.log
           done
           if $PROXY_OK; then
-            echo ""
             echo "Qwen proxy responding at http://localhost:8080/v1"
             echo "Available models:"
             curl -sf http://localhost:8080/v1/models \
-              | jq -r '.data[].id' 2>/dev/null | sed 's/^/  - /' \
-              || echo "  (could not parse model list)"
-            echo ""
+              | jq -r '.data[].id' 2>/dev/null | sed 's/^/  - /'
             echo "Account status:"
             grep -E 'acc[0-9]+:' ~/proxy.log | tail -5 | sed 's/^/  /'
           else
-            echo ""
             echo "WARNING: Qwen proxy did not respond after 6 attempts."
           fi
           tail -n +1 -f ~/proxy.log &
 
-      - name: Launch tmate, ttyd, Cloudflare and Hub OS
+      - name: Launch Upterm, ttyd, Cloudflare and Hub OS
         env:
           SESSION_LABEL: ${{ inputs.label || 'Cloud Hub OS' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          AUTO_COMMIT: ${{ inputs.auto_commit || 'off' }}
+          AUTO_COMMIT_INTERVAL: ${{ inputs.auto_commit_interval || '30' }}
         run: |
           ACTOR="${{ github.actor }}"
           REPO="${{ github.repository }}"
           SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
           SESSION_START=$(date +%s)
+          WATCHER_PID=""
+          AUTO_COMMIT_PID=""
+
+          if ! echo "$AUTO_COMMIT_INTERVAL" | grep -qE '^[0-9]+$'; then
+            AUTO_COMMIT_INTERVAL=30
+          fi
 
           source /usr/local/lib/hubos/lib.sh
 
           log() {
-            local level="$1"
-            shift
-            printf '[%s] [%-9s] %s\n' "$(date -u '+%H:%M:%S')" "$level" "$*"
+            printf '[%s] [%-9s] %s\n' "$(date -u '+%H:%M:%S')" "$1" "${*:2}"
           }
 
-          cat >> ~/.bashrc << ENVEOF
-          export SESSION_LABEL="$SESSION_LABEL"
-          export GITHUB_REPOSITORY="$REPO"
-          ENVEOF
+          _start_upterm() {
+            local old_pid
+            old_pid=$(cat /tmp/upterm_pid 2>/dev/null || echo "")
+            [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+            rm -f ~/upterm.log
 
-          mkdir -p ~/.ssh
-          curl -sf "https://github.com/$ACTOR.keys" >> ~/.ssh/authorized_keys 2>/dev/null || true
-          chmod 700 ~/.ssh
-          chmod 600 ~/.ssh/authorized_keys
+            upterm host \
+              --authorized-key ~/.ssh/authorized_keys \
+              --force-command "tmux attach-session -t $TMUX_SESSION" \
+              -- bash -c "while true; do sleep 30; done" \
+              > ~/upterm.log 2>&1 &
+            echo "$!" > /tmp/upterm_pid
 
-          tmux new-session -d -s "$TMUX_SESSION" -n "monitor" -x 220 -y 50
-          tmux new-window -t "$TMUX_SESSION" -n "u-$ACTOR"
-          sleep 1
-          tmux send-keys -t "$TMUX_SESSION:u-$ACTOR" \
-            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; hub" \
-            Enter
-          tmux select-window -t "$TMUX_SESSION:monitor"
+            local ssh_link=""
+            for i in $(seq 1 30); do
+              ssh_link=$(grep -oE 'ssh [a-zA-Z0-9_:-]+@[a-zA-Z0-9._-]+' \
+                ~/upterm.log 2>/dev/null | grep -v '^ssh $' | head -1)
+              [ -n "$ssh_link" ] && break
+              sleep 1
+            done
 
-          _start_tmate() {
-            rm -f /tmp/tmate.sock
-            tmate -S /tmp/tmate.sock \
-              new-session -d -s "tmate-bridge" \
-              "while true; do tmux attach-session -t $TMUX_SESSION 2>/dev/null; sleep 1; done"
-            tmate -S /tmp/tmate.sock wait tmate-ready 2>/dev/null || true
-            sleep 3
-            local ssh web
-            ssh=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "")
-            web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "")
-            if [ -z "$ssh" ]; then
-              sleep 5
-              ssh=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
-              web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
-            fi
-            printf '%s' "$ssh" > "$HUB_CONF/tmate_ssh"
-            printf '%s' "$web" > "$HUB_CONF/tmate_web"
-            echo "$ssh"
+            printf '%s' "${ssh_link:-unavailable}" > "$HUB_CONF/upterm_ssh"
+            echo "${ssh_link:-unavailable}"
           }
 
           _compute_shutdown_at() {
@@ -1048,14 +1050,65 @@ jobs:
               done
             done
             local extra=$(( total_files / 20 * 60 ))
-            [ $extra -gt 1200 ] && extra=1200
-            local buffer=$((600 + extra))
-            local job_end=$(( SESSION_START + 22200 ))
-            echo $(( job_end - buffer ))
+            [ "$extra" -gt 1200 ] && extra=1200
+            echo $(( SESSION_START + 22200 - 600 - extra ))
           }
 
-          TMATE_SSH=$(_start_tmate)
-          TMATE_WEB=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "unavailable")
+          _write_summary() {
+            local status="$1"
+            local UPTIME_MIN=$(( ($(date +%s) - SESSION_START) / 60 ))
+            {
+              echo "## ☁ Cloud Hub OS — Session Summary"
+              echo ""
+              echo "| Field | Value |"
+              echo "|-------|-------|"
+              echo "| Status | $status |"
+              echo "| Uptime | ${UPTIME_MIN} minutes |"
+              echo "| Actor | \`$ACTOR\` |"
+              echo "| Repo | \`$REPO\` |"
+              echo "| Label | $SESSION_LABEL |"
+              echo "| Auto-commit | $AUTO_COMMIT (every ${AUTO_COMMIT_INTERVAL}min) |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          _signal_handler() {
+            log "KILLED" "GitHub cancelled or timed out job"
+            kill "$WATCHER_PID" 2>/dev/null || true
+            kill "$AUTO_COMMIT_PID" 2>/dev/null || true
+            _write_summary "Killed by GitHub (timeout or cancel)"
+            exit 0
+          }
+          trap '_signal_handler' SIGTERM SIGINT
+
+          cat >> ~/.bashrc << ENVEOF
+          export SESSION_LABEL="$SESSION_LABEL"
+          export GITHUB_REPOSITORY="$REPO"
+          ENVEOF
+
+          mkdir -p ~/.ssh
+          curl -sf "https://github.com/$ACTOR.keys" >> ~/.ssh/authorized_keys 2>/dev/null || true
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/authorized_keys
+
+          tmux new-session -d -s "$TMUX_SESSION" -n "monitor" -x 220 -y 50
+          tmux new-window -t "$TMUX_SESSION" -n "links"
+          tmux new-window -t "$TMUX_SESSION" -n "u-$ACTOR"
+          sleep 1
+
+          tmux send-keys -t "$TMUX_SESSION:monitor" \
+            "tail -f ~/proxy.log" Enter
+
+          tmux send-keys -t "$TMUX_SESSION:links" \
+            "source ~/.bashrc; while true; do clear; hub_print_links; echo 'Refreshes every 30s. Run: links'; sleep 30; done" Enter
+
+          tmux send-keys -t "$TMUX_SESSION:u-$ACTOR" \
+            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; while true; do hub; done" \
+            Enter
+
+          tmux select-window -t "$TMUX_SESSION:u-$ACTOR"
+
+          log "START" "Starting upterm SSH tunnel..."
+          UPTERM_SSH=$(_start_upterm)
 
           ttyd \
             --writable \
@@ -1074,34 +1127,50 @@ jobs:
             [ -n "$CF_URL" ] && break
             sleep 1
           done
-
           printf '%s' "${CF_URL:-unavailable}" > "$HUB_CONF/cf_web"
 
           SHUTDOWN_AT=$(_compute_shutdown_at)
 
           log "START" "Session: $SESSION_LABEL | Actor: $ACTOR | Repo: $REPO"
-          log "START" "Job limit: 370min | Graceful shutdown computed dynamically"
-          log "LINK" "SSH  : $TMATE_SSH"
-          log "LINK" "WEB  : $TMATE_WEB"
-          log "LINK" "TTYD : ${CF_URL:-check cf.log}"
-          log "INFO" "Termux: pkg install openssh && $TMATE_SSH"
-          log "INFO" "Scroll: Ctrl+B [  then arrows/PgUp/PgDn  then q to exit"
-          log "INFO" "Note: press q on tmate status screen to proceed to hub"
+          log "START" "Auto-commit: $AUTO_COMMIT every ${AUTO_COMMIT_INTERVAL}min"
+          log "LINK" "SSH  : $UPTERM_SSH"
+          log "LINK" "WEB  : ${CF_URL:-check cf.log}"
+          log "INFO" "Termux: pkg install openssh && $UPTERM_SSH"
+          log "INFO" "Scroll: Ctrl+B [ then arrows/PgUp/PgDn then q"
+          log "INFO" "Links window: Ctrl+B 2 (auto-refreshes every 30s)"
+          log "INFO" "Detach: Ctrl+B d  (session stays alive, reconnect anytime)"
           echo ""
 
           (
             while true; do
               sleep 60
-              if ! tmate -S /tmp/tmate.sock ls >/dev/null 2>&1; then
-                log "TMATE" "Socket lost -- restarting tmate..."
-                NEW_SSH=$(_start_tmate)
-                NEW_WEB=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "unavailable")
-                log "TMATE" "New SSH : $NEW_SSH"
-                log "TMATE" "New WEB : $NEW_WEB"
+              UPTERM_PID=$(cat /tmp/upterm_pid 2>/dev/null || echo "")
+              if [ -n "$UPTERM_PID" ] && ! kill -0 "$UPTERM_PID" 2>/dev/null; then
+                log "UPTERM" "Process died -- restarting..."
+                NEW_SSH=$(_start_upterm)
+                log "UPTERM" "New SSH: $NEW_SSH"
               fi
             done
           ) &
           WATCHER_PID=$!
+
+          if [ "$AUTO_COMMIT" != "off" ]; then
+            (
+              INTERVAL_SECS=$(( AUTO_COMMIT_INTERVAL * 60 ))
+              while true; do
+                sleep "$INTERVAL_SECS"
+                AMSG="Auto-commit: $(date -u '+%Y-%m-%d %H:%M UTC')"
+                if [ "$AUTO_COMMIT" = "global" ]; then
+                  OUT=$(gcommit "$AMSG" 2>&1)
+                else
+                  OUT=$(commit "$AMSG" 2>&1)
+                fi
+                while IFS= read -r line; do log "AUTOCOMMIT" "$line"; done <<< "$OUT"
+              done
+            ) &
+            AUTO_COMMIT_PID=$!
+            log "AUTOCOMMIT" "Started: mode=$AUTO_COMMIT interval=${AUTO_COMMIT_INTERVAL}min"
+          fi
 
           LAST_CLIENTS=0
           TIMER=0
@@ -1109,20 +1178,34 @@ jobs:
           while true; do
             NOW=$(date +%s)
             if [ "$NOW" -ge "$SHUTDOWN_AT" ]; then
-              log "SHUTDOWN" "Graceful shutdown: time limit reached"
-              log "SHUTDOWN" "SSH was: $TMATE_SSH"
+              log "SHUTDOWN" "Graceful time limit reached"
+              log "SHUTDOWN" "SSH was: $UPTERM_SSH"
               log "SHUTDOWN" "WEB was: ${CF_URL:-check cf.log}"
-              kill $WATCHER_PID 2>/dev/null
+              kill "$WATCHER_PID" 2>/dev/null || true
+              kill "$AUTO_COMMIT_PID" 2>/dev/null || true
+              _write_summary "Graceful shutdown (time limit)"
               break
             fi
 
-            CLIENTS=$(tmate -S /tmp/tmate.sock list-clients 2>/dev/null | wc -l)
+            CLIENTS=$(upterm session current \
+              --admin-socket "$(ls /tmp/upterm*.sock 2>/dev/null | head -1)" \
+              2>/dev/null | grep -c 'Client' || \
+              cat /tmp/upterm_pid 2>/dev/null | xargs -I{} sh -c 'kill -0 {} 2>/dev/null && echo 0 || echo 0')
+            CLIENTS=$(tmate -S /tmp/tmate.sock list-clients 2>/dev/null | wc -l || echo 0)
+
+            UPTERM_PID=$(cat /tmp/upterm_pid 2>/dev/null || echo "")
+            if [ -n "$UPTERM_PID" ] && kill -0 "$UPTERM_PID" 2>/dev/null; then
+              CLIENTS=1
+            else
+              CLIENTS=0
+            fi
 
             if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
               if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
-                log "JOIN" "User connected | active: $CLIENTS | SSH: $TMATE_SSH"
+                FRESH_SSH=$(cat "$HUB_CONF/upterm_ssh" 2>/dev/null || echo "$UPTERM_SSH")
+                log "JOIN" "User connected | SSH: $FRESH_SSH"
               else
-                log "LEAVE" "User disconnected | active: $CLIENTS"
+                log "LEAVE" "Connection ended"
               fi
               LAST_CLIENTS="$CLIENTS"
               TIMER=0
@@ -1134,10 +1217,11 @@ jobs:
               PROXY_STATUS="down"
               hub_proxy_alive && PROXY_STATUS="up"
               SHUTDOWN_AT=$(_compute_shutdown_at)
-              log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | left: ~${MINS_LEFT}min | clients: $CLIENTS | proxy: $PROXY_STATUS"
-              log "HEARTBEAT" "SSH: $TMATE_SSH"
+              FRESH_SSH=$(cat "$HUB_CONF/upterm_ssh" 2>/dev/null || echo "$UPTERM_SSH")
+              log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | left: ~${MINS_LEFT}min | proxy: $PROXY_STATUS"
+              log "HEARTBEAT" "SSH: $FRESH_SSH | WEB: ${CF_URL:-check cf.log}"
               if hub_proxy_any_invalid; then
-                log "WARN" "One or more proxy accounts INVALID -- use hub option 8 to reauth"
+                log "WARN" "Proxy account(s) INVALID -- use hub option 9 to reauth"
               fi
               TIMER=0
             fi
@@ -1146,7 +1230,7 @@ jobs:
             TIMER=$((TIMER + 5))
           done
 
-          log "END" "Watchtower exited -- auto-save step will run next"
+          log "END" "Watchtower done -- auto-save step runs next"
 
       - name: Auto-Save All Repos on Exit
         if: always()

@@ -1,0 +1,27 @@
+#!/bin/bash
+source /usr/local/lib/hubos/lib.sh
+export PATH="$HOME/.local/bin:/opt/hermes-agent/venv/bin:$PATH"
+
+WORK_DIR="$PWD"
+REPO_NAME=$(basename "$WORK_DIR")
+BLOCKED="workspace workspaces runner home tmp"
+for _b in $BLOCKED; do
+  if [ "$REPO_NAME" = "$_b" ]; then
+    printf 'ERROR: cd into a repository first.\nCurrent: %s\nUse: go <n>  or  cdw\n' "$WORK_DIR"
+    exit 1
+  fi
+done
+
+if ! hub_proxy_alive; then
+  printf 'WARNING: Qwen proxy not responding at %s\n' "$PROXY_URL"
+  printf 'Hermes will launch but API calls may fail.\n'
+fi
+
+hub_write_hermes_config "$HOME/.hermes"
+export OPENAI_API_KEY="sk-qwen-proxy-local"
+export OPENAI_BASE_URL="$PROXY_URL/v1"
+
+printf 'Hermes  |  repo: [%s]\ncwd:    %s\nproxy:  %s/v1\n/exit or Ctrl+D to return to shell\n\n' \
+  "$REPO_NAME" "$WORK_DIR" "$PROXY_URL"
+
+cd "$WORK_DIR" && exec hermes "$@"

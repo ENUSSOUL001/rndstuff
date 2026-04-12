@@ -1,0 +1,18 @@
+#!/bin/bash
+source /usr/local/lib/hubos/lib.sh
+TARGET="${HUB_REPO_OVERRIDE:-$(hub_current_repo)}"
+TARGET="${TARGET:-$(pwd)}"
+MSG="${*:-Cloud session save $(date -u '+%Y-%m-%d %H:%M UTC')}"
+if [ ! -d "$TARGET/.git" ]; then
+  printf 'No git repo at: %s\nUse "go <n>" or "cdw" first.\n' "$TARGET"; exit 1
+fi
+USER="$(hub_active_user)"
+cd "$TARGET" || exit 1
+git config user.name  "$USER"
+git config user.email "$(hub_user_email "$USER")"
+git add -A
+if git diff-index --quiet HEAD 2>/dev/null; then
+  printf 'Nothing new to commit in: %s\n' "$(basename "$TARGET")"
+else
+  git commit -m "$MSG" && git push && printf 'Saved and pushed: %s\n' "$TARGET"
+fi

@@ -1,0 +1,12 @@
+#!/bin/bash
+source /usr/local/lib/hubos/lib.sh
+MSG="${*:-Global commit $(date -u '+%Y-%m-%d %H:%M UTC')}"
+printf 'Global commit across all users\n'
+for user_dir in "$WORKSPACES"/*/; do
+  [ -d "$user_dir" ] || continue
+  USER="$(basename "$user_dir")"
+  for repo_dir in "$user_dir"*/; do
+    [ -d "$repo_dir/.git" ] || continue
+    hub_save_repo "$repo_dir" "$MSG" "$USER"
+  done
+done

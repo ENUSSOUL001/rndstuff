@@ -1,0 +1,19 @@
+model:
+  provider: custom
+  base_url: http://localhost:8080/v1
+  default: qwen3.6-plus
+  context_length: 1048576
+compression:
+  enabled: true
+  threshold: 0.95
+  target_ratio: 0.20
+  protect_last_n: 50
+agent:
+  max_turns: 10000
+tools:
+  timeout: 21600
+api:
+  timeout: 21600
+display:
+  verbose: true
+  skin: default

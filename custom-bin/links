@@ -1,0 +1,3 @@
+#!/bin/bash
+source /usr/local/lib/hubos/lib.sh
+hub_print_links

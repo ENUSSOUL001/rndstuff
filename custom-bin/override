@@ -1,0 +1,14 @@
+#!/bin/bash
+source /usr/local/lib/hubos/lib.sh
+TARGET="$(hub_current_repo)"
+TARGET="${TARGET:-$(pwd)}"
+MSG="${*:-Override commit $(date -u '+%Y-%m-%d %H:%M UTC')}"
+if [ ! -d "$TARGET/.git" ]; then printf 'No git repo at: %s\n' "$TARGET"; exit 1; fi
+USER="$(hub_active_user)"
+cd "$TARGET" || exit 1
+git config user.name  "$USER"
+git config user.email "$(hub_user_email "$USER")"
+git add -A
+git commit --allow-empty -m "$MSG"
+git push --force
+printf 'Force pushed: %s\n' "$TARGET"

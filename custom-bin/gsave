@@ -1,0 +1,49 @@
+#!/bin/bash
+source /usr/local/lib/hubos/lib.sh
+MSG="${*:-Global save $(date -u '+%Y-%m-%d %H:%M UTC')}"
+printf 'gsave: committing all repos and system state\n\n'
+
+for user_dir in "$WORKSPACES"/*/; do
+  [ -d "$user_dir" ] || continue
+  USER="$(basename "$user_dir")"
+  for repo_dir in "$user_dir"*/; do
+    [ -d "$repo_dir/.git" ] || continue
+    hub_save_repo "$repo_dir" "$MSG" "$USER"
+  done
+done
+
+ACTOR="$(hub_active_user)"
+PAT="$(hub_user_pat "$ACTOR")"
+REPO="$(hub_github_repo)"
+
+if [ -z "$PAT" ] || [ -z "$REPO" ]; then
+  printf 'Skipping system state: no PAT or repo configured\n'
+  exit 0
+fi
+
+STATE_DIR="$HOME/.hub-state"
+mkdir -p "$STATE_DIR"
+cd "$STATE_DIR" || exit 1
+
+git init -q 2>/dev/null || true
+git config user.name  "$ACTOR"
+git config user.email "$(hub_user_email "$ACTOR")"
+git remote remove origin 2>/dev/null || true
+git remote add origin "https://$ACTOR:$PAT@github.com/$REPO.git"
+
+mkdir -p hermes custom-bin hubos
+cp ~/.hermes/config.yaml hermes/ 2>/dev/null || true
+cp ~/.hermes/.env hermes/ 2>/dev/null || true
+cp -r ~/.hermes/skills hermes/ 2>/dev/null || true
+cp ~/.bashrc . 2>/dev/null || true
+cp ~/.tmux.conf . 2>/dev/null || true
+for f in hub h save override commit gcommit gsave secrets links; do
+  cp "/usr/local/bin/$f" custom-bin/ 2>/dev/null || true
+done
+cp /usr/local/lib/hubos/lib.sh hubos/ 2>/dev/null || true
+
+git add -A
+git commit --allow-empty -m "System state: $MSG" \
+  && git push origin HEAD:hub-state --force \
+  && printf '  system state -> hub-state branch\n' \
+  || printf '  system state push failed (check PAT and repo access)\n'

@@ -67,7 +67,8 @@ jobs:
             wget \
             openssh-client \
             procps \
-            iproute2
+            iproute2 \
+            screen
           pip install PyNaCl --break-system-packages -q
 
       - name: Install ttyd
@@ -132,6 +133,8 @@ jobs:
           export TMUX_SESSION="cloud"
           export SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
           export PROXY_URL="http://localhost:8080"
+          export TERM="${TERM:-xterm-256color}"
+          export COLORTERM="${COLORTERM:-truecolor}"
           mkdir -p "$USERS_DIR" "$WORKSPACES" "$HUB_CONF"
 
           hub_active_user() {
@@ -787,6 +790,7 @@ jobs:
           cat >> ~/.bashrc << 'RCEOF'
 
           export TERM="${TERM:-xterm-256color}"
+          export COLORTERM="${COLORTERM:-truecolor}"
           source /usr/local/lib/hubos/lib.sh 2>/dev/null
 
           cdw() {
@@ -912,6 +916,8 @@ jobs:
           AUTO_COMMIT: ${{ inputs.auto_commit || 'off' }}
           AUTO_COMMIT_INTERVAL: ${{ inputs.auto_commit_interval || '30' }}
           SESSION_PASS: ${{ secrets.PASS }}
+          TERM: xterm-256color
+          COLORTERM: truecolor
         run: |
           ACTOR="${{ github.actor }}"
           REPO="${{ github.repository }}"
@@ -979,6 +985,8 @@ jobs:
           cat >> ~/.bashrc << ENVEOF
           export SESSION_LABEL="$SESSION_LABEL"
           export GITHUB_REPOSITORY="$REPO"
+          export TERM="xterm-256color"
+          export COLORTERM="truecolor"
           ENVEOF
 
           mkdir -p ~/.ssh
@@ -992,13 +1000,13 @@ jobs:
           sleep 1
 
           tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:monitor" \
-            "tail -f ~/proxy.log" Enter
+            "export TERM=xterm-256color COLORTERM=truecolor; tail -f ~/proxy.log" Enter
 
           tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:links" \
-            "source ~/.bashrc; while true; do clear; hub_print_links; echo 'Auto-refreshes every 30s'; sleep 30; done" Enter
+            "export TERM=xterm-256color COLORTERM=truecolor; source ~/.bashrc; while true; do clear; hub_print_links; echo 'Auto-refreshes every 30s'; sleep 30; done" Enter
 
           tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:u-$ACTOR" \
-            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; while true; do hub; done" Enter
+            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO' TERM=xterm-256color COLORTERM=truecolor; source ~/.bashrc; clear; while true; do hub; done" Enter
 
           tmate -S "$TMATE_SOCK" select-window -t "$TMUX_SESSION:u-$ACTOR"
 

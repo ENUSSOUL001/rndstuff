@@ -57,7 +57,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             clang \
-            tmux \
+            tmate \
             dialog \
             jq \
             python3-pip \
@@ -69,14 +69,6 @@ jobs:
             procps \
             iproute2
           pip install PyNaCl --break-system-packages -q
-
-      - name: Install Upterm and Code Server
-        run: |
-          UPTERM_VER=$(curl -sf https://api.github.com/repos/owenthereal/upterm/releases/latest | jq -r '.tag_name')
-          wget -qO /tmp/upterm.tar.gz "https://github.com/owenthereal/upterm/releases/download/${UPTERM_VER}/upterm_linux_amd64.tar.gz"
-          tar -xzf /tmp/upterm.tar.gz -C /tmp
-          sudo install /tmp/upterm /usr/local/bin/upterm
-          curl -fsSL https://code-server.dev/install.sh | sh
 
       - name: Install Cloudflared
         run: |
@@ -128,6 +120,7 @@ jobs:
           export USERS_DIR="$HUB_DIR/users"
           export WORKSPACES="$HOME/workspaces"
           export HUB_CONF="$HUB_DIR/config"
+          export TMATE_SOCK="/tmp/tmate.sock"
           export TMUX_SESSION="cloud"
           export SESSION_LABEL="${SESSION_LABEL:-Cloud Hub OS}"
           export PROXY_URL="http://localhost:8080"
@@ -149,7 +142,7 @@ jobs:
           hub_proxy_account_status() { grep -E 'acc[0-9]+:' ~/proxy.log 2>/dev/null | tail -5; }
           hub_proxy_any_invalid()    { grep -qiE 'acc[0-9]+: *(invalid|expired)' ~/proxy.log 2>/dev/null; }
 
-          hub_tmux() { tmux "$@"; }
+          hub_tmux() { tmux -S "$TMATE_SOCK" "$@"; }
 
           hub_write_hermes_config() {
             local profile_dir="$1"
@@ -183,21 +176,21 @@ jobs:
             repo="$(hub_github_repo)"
             if [ -z "$pat" ]; then dialog --msgbox "ERROR: No PAT found." 7 52; return 1; fi
             if [ -z "$repo" ]; then dialog --msgbox "ERROR: GitHub repo not set." 7 52; return 1; fi
-            if [ -z "$sname" ] ||[ -z "$sval" ]; then dialog --msgbox "ERROR: Name or value empty." 5 45; return 1; fi
+            if [ -z "$sname" ] || [ -z "$sval" ]; then dialog --msgbox "ERROR: Name or value empty." 5 45; return 1; fi
             local pk_json
             pk_json=$(curl -sf \
               -H "Authorization: Bearer $pat" \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/$repo/actions/secrets/public-key" 2>/dev/null)
-            if [ -z "$pk_json" ] ||[ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
+            if [ -z "$pk_json" ] || [ "$(echo "$pk_json" | jq -r '.key // empty')" = "" ]; then
               dialog --msgbox "ERROR: Could not fetch public key.\nCheck PAT has repo scope." 7 58; return 1
             fi
             local key_id key_val encrypted http_code
             key_id=$(echo "$pk_json" | jq -r '.key_id')
             key_val=$(echo "$pk_json" | jq -r '.key')
             encrypted=$(python3 /usr/local/bin/hub_encrypt.py "$key_val" "$sval" 2>/dev/null)
-            if[ -z "$encrypted" ]; then dialog --msgbox "ERROR: Encryption failed." 7 52; return 1; fi
+            if [ -z "$encrypted" ]; then dialog --msgbox "ERROR: Encryption failed." 7 52; return 1; fi
             http_code=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
               -H "Authorization: Bearer $pat" \
               -H "Accept: application/vnd.github+json" \
@@ -244,17 +237,18 @@ jobs:
           }
 
           hub_print_links() {
-            local u_ssh cf_web
-            u_ssh=$(cat "$HUB_CONF/upterm_ssh" 2>/dev/null || echo "not ready")
-            cf_web=$(cat "$HUB_CONF/cf_web" 2>/dev/null || echo "not ready")
+            local tmate_ssh tmate_web
+            tmate_ssh=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "not ready")
+            tmate_web=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "not ready")
             printf '\n'
             printf '  +------------------------------------------------------------------+\n'
-            printf '  |  SSH (Upterm native tunnel):                                     |\n'
-            printf '  |  %s\n' "$u_ssh"
+            printf '  |  SSH  (anyone with this link, no extra tools needed):           |\n'
+            printf '  |  %s\n' "$tmate_ssh"
+            printf '  |  Termux: pkg install openssh && %s\n' "$tmate_ssh"
             printf '  |                                                                  |\n'
-            printf '  |  WEB (VS Code IDE + Terminal):                                   |\n'
-            printf '  |  %s\n' "$cf_web"
-            printf '  |  Password: value of GitHub secret PASS                           |\n'
+            printf '  |  WEB  (browser, direct tmate.io session):                      |\n'
+            printf '  |  %s\n' "$tmate_web"
+            printf '  |  No password required - tmate handles auth                     |\n'
             printf '  +------------------------------------------------------------------+\n'
             printf '\n'
           }
@@ -321,9 +315,9 @@ jobs:
                 4)
                   local sname sval confirm
                   sname=$(dialog --clear --inputbox "Secret name:" 8 52 3>&1 1>&2 2>&3)
-                  if[ -n "$sname" ]; then
+                  if [ -n "$sname" ]; then
                     sval=$(dialog --clear --passwordbox "Value:" 8 52 3>&1 1>&2 2>&3)
-                    if[ -n "$sval" ]; then
+                    if [ -n "$sval" ]; then
                       confirm=$(dialog --clear --passwordbox "Confirm value:" 8 52 3>&1 1>&2 2>&3)
                       if [ "$sval" = "$confirm" ]; then hub_push_secret "$sname" "$sval"
                       else dialog --msgbox "Values do not match." 6 36; fi
@@ -333,7 +327,7 @@ jobs:
                 5)
                   local sname sval
                   sname=$(dialog --clear --inputbox "Secret name:" 8 52 3>&1 1>&2 2>&3)
-                  if[ -n "$sname" ]; then
+                  if [ -n "$sname" ]; then
                     sval=$(_read_multiline "Custom: $sname" "  Paste value below.")
                     if [ -n "$sval" ] && _confirm_secret "$sname" "$sval"; then hub_push_secret "$sname" "$sval"; fi
                   fi
@@ -360,7 +354,7 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator" \
               | jq -r '.[].full_name' 2>/dev/null)
-            if[ -z "$REPOS" ]; then
+            if [ -z "$REPOS" ]; then
               dialog --msgbox "Failed to fetch repos.\nCheck PAT has repo scope." 7 52; return
             fi
             local OPTS=()
@@ -416,18 +410,19 @@ jobs:
                 "${OPTS[@]}" 3>&1 1>&2 2>&3) || return
               if [ "$U_CHOICE" = "__add__" ]; then
                 local NEW_USER NEW_PAT NEW_EMAIL PROFILE
-                NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)[ -z "$NEW_USER" ] && return
+                NEW_USER=$(dialog --clear --inputbox "GitHub Username:" 8 48 3>&1 1>&2 2>&3)
+                [ -z "$NEW_USER" ] && return
                 NEW_PAT=$(dialog --clear --passwordbox \
                   "GitHub PAT (repo + workflow, classic):" 9 54 3>&1 1>&2 2>&3)
                 [ -z "$NEW_PAT" ] && return
                 dialog --infobox "Verifying credentials..." 4 40
                 PROFILE=$(curl -sf -H "Authorization: token $NEW_PAT" \
                   https://api.github.com/user 2>/dev/null)
-                if[ -z "$PROFILE" ] || [ "$(echo "$PROFILE" | jq -r '.login // empty')" = "" ]; then
+                if [ -z "$PROFILE" ] || [ "$(echo "$PROFILE" | jq -r '.login // empty')" = "" ]; then
                   dialog --msgbox "ERROR: Invalid credentials." 6 40; return
                 fi
                 NEW_EMAIL=$(echo "$PROFILE" | jq -r '.email // empty')
-                if[ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then
+                if [ -z "$NEW_EMAIL" ] || [ "$NEW_EMAIL" = "null" ]; then
                   NEW_EMAIL=$(dialog --clear --inputbox "Email (not public):" 8 48 3>&1 1>&2 2>&3)
                   [ -z "$NEW_EMAIL" ] && NEW_EMAIL="${NEW_USER}@cloud.local"
                 fi
@@ -440,7 +435,7 @@ jobs:
                 if dialog --yesno "User '$NEW_USER' added!\nSave PAT as GH_SYNC_TOKEN?" 8 52; then
                   hub_push_secret "GH_SYNC_TOKEN" "$NEW_PAT" "$NEW_PAT"
                 fi
-              elif[ -n "$U_CHOICE" ]; then
+              elif [ -n "$U_CHOICE" ]; then
                 CURRENT_USER="$U_CHOICE"
                 hub_set_user "$CURRENT_USER"
                 hub_ensure_window "$CURRENT_USER"
@@ -462,7 +457,7 @@ jobs:
               qwen-proxy auth add "$acc"
               local result=$?
               echo ""
-              if[ $result -eq 0 ]; then
+              if [ $result -eq 0 ]; then
                 local creds_file="$HOME/.qwen/oauth_creds_${acc}.json"
                 if [ -f "$creds_file" ]; then
                   if dialog --yesno \
@@ -489,8 +484,10 @@ jobs:
               3>&1 1>&2 2>&3) || return
             SELECTED=$(printf '%s' "$SELECTED" | tr -d '"' | tr ' ' '\n' | grep -v '^$')
             [ -z "$SELECTED" ] && dialog --msgbox "No accounts selected." 5 32 && return
-            while IFS= read -r acc; do[ -z "$acc" ] && continue
-              local sname="CACHE_BLOB"[ "$acc" = "acc2" ] && sname="CACHE_BLOB_2"
+            while IFS= read -r acc; do
+              [ -z "$acc" ] && continue
+              local sname="CACHE_BLOB"
+              [ "$acc" = "acc2" ] && sname="CACHE_BLOB_2"
               _reauth_account "$acc" "$sname"
             done <<< "$SELECTED"
             dialog --msgbox "Reauth done." 5 30
@@ -546,7 +543,7 @@ jobs:
               7)
                 clear
                 hub_tmux list-windows -t "$TMUX_SESSION" 2>/dev/null \
-                  || echo "(tmux session not found)"
+                  || echo "(tmate session not found)"
                 read -rp "Press Enter to return..." _dummy
                 ;;
               8)
@@ -588,9 +585,10 @@ jobs:
           |  hub           -> back to main menu                             |
           |                                                                  |
           |  Scroll:                                                          |
-          |  Ctrl+B[      enter scroll mode                                |
+          |  Ctrl+B [      enter scroll mode                                |
           |  Arrow / PgUp  scroll                                           |
           |  q             exit scroll mode                                 |
+          |  Two-finger swipe works in Termux (mouse mode on)               |
           +------------------------------------------------------------------+
           SHELLTIP
                 break
@@ -614,7 +612,8 @@ jobs:
           WORK_DIR="$PWD"
           REPO_NAME=$(basename "$WORK_DIR")
           BLOCKED="workspace workspaces runner home tmp"
-          for _b in $BLOCKED; do[ "$REPO_NAME" = "$_b" ] && \
+          for _b in $BLOCKED; do
+            [ "$REPO_NAME" = "$_b" ] && \
               printf 'ERROR: cd into a repo first.\nCurrent: %s\nUse: go <n>  or  cdw\n' "$WORK_DIR" && exit 1
           done
           if ! hub_proxy_alive; then
@@ -687,7 +686,8 @@ jobs:
           source /usr/local/lib/hubos/lib.sh
           MSG="${*:-Global commit $(date -u '+%Y-%m-%d %H:%M UTC')}"
           printf 'Global commit across all users\n'
-          for user_dir in "$WORKSPACES"/*/; do[ -d "$user_dir" ] || continue
+          for user_dir in "$WORKSPACES"/*/; do
+            [ -d "$user_dir" ] || continue
             USER="$(basename "$user_dir")"
             for repo_dir in "$user_dir"*/; do
               [ -d "$repo_dir/.git" ] || continue
@@ -706,13 +706,14 @@ jobs:
           for user_dir in "$WORKSPACES"/*/; do
             [ -d "$user_dir" ] || continue
             USER="$(basename "$user_dir")"
-            for repo_dir in "$user_dir"*/; do[ -d "$repo_dir/.git" ] || continue
+            for repo_dir in "$user_dir"*/; do
+              [ -d "$repo_dir/.git" ] || continue
               hub_save_repo "$repo_dir" "$MSG" "$USER"
             done
           done
 
           CURRENT_REPO="$(hub_current_repo)"
-          if [ -z "$CURRENT_REPO" ] ||[ ! -d "$CURRENT_REPO/.git" ]; then
+          if [ -z "$CURRENT_REPO" ] || [ ! -d "$CURRENT_REPO/.git" ]; then
             for user_dir in "$WORKSPACES"/*/; do
               for repo_dir in "$user_dir"*/; do
                 if [ -d "$repo_dir/.git" ]; then CURRENT_REPO="$repo_dir"; break 2; fi
@@ -782,7 +783,7 @@ jobs:
           cdw() {
             local REPO
             REPO="$(hub_current_repo)"
-            if [ -z "$REPO" ] ||[ ! -d "$REPO" ]; then
+            if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
               printf 'No repo set. Use hub -> Select Repository or: go <n>\n'; return 1
             fi
             cd "$REPO" && printf '%s\n' "$REPO"
@@ -846,7 +847,7 @@ jobs:
           set -g window-status-format         " #I:#W "
           set -g window-status-current-format "#[fg=colour82,bold,bg=colour238] #I:#W* "
           set -g window-status-separator      ""
-          set -g mouse off
+          set -g mouse on
           set -g history-limit 50000
           set -g base-index 1
           set -g pane-base-index 1
@@ -855,6 +856,7 @@ jobs:
           set -g escape-time 10
           set -g renumber-windows on
           set -g allow-rename off
+          bind -n WheelUpPane if-shell -F -t = "#{mouse_any_flag}" "send-keys -M" "copy-mode -e"
           bind r source-file ~/.tmux.conf \; display "Config reloaded"
           bind H run-shell "hub"
           bind S run-shell "save"
@@ -894,13 +896,12 @@ jobs:
           fi
           tail -n +1 -f ~/proxy.log &
 
-      - name: Launch Upterm, Code Server, Cloudflare and Hub OS
+      - name: Launch tmate and Hub OS
         env:
           SESSION_LABEL: ${{ inputs.label || 'Cloud Hub OS' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           AUTO_COMMIT: ${{ inputs.auto_commit || 'off' }}
           AUTO_COMMIT_INTERVAL: ${{ inputs.auto_commit_interval || '30' }}
-          SESSION_PASS: ${{ secrets.PASS }}
         run: |
           ACTOR="${{ github.actor }}"
           REPO="${{ github.repository }}"
@@ -975,73 +976,75 @@ jobs:
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/authorized_keys
 
-          tmux new-session -d -s "$TMUX_SESSION" -n "monitor" -x 220 -y 50
-          tmux new-window -t "$TMUX_SESSION" -n "links"
-          tmux new-window -t "$TMUX_SESSION" -n "u-$ACTOR"
+          tmate -S "$TMATE_SOCK" new-session -d -s "$TMUX_SESSION" -n "monitor" -x 220 -y 50
+          tmate -S "$TMATE_SOCK" new-window -t "$TMUX_SESSION" -n "links"
+          tmate -S "$TMATE_SOCK" new-window -t "$TMUX_SESSION" -n "u-$ACTOR"
           sleep 1
 
-          tmux send-keys -t "$TMUX_SESSION:monitor" "tail -f ~/proxy.log" Enter
+          tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:monitor" \
+            "tail -f ~/proxy.log" Enter
 
-          tmux send-keys -t "$TMUX_SESSION:links" "source ~/.bashrc; while true; do clear; hub_print_links; echo 'Auto-refreshes every 30s'; sleep 30; done" Enter
+          tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:links" \
+            "source ~/.bashrc; while true; do clear; hub_print_links; echo 'Auto-refreshes every 30s'; sleep 30; done" Enter
 
-          tmux send-keys -t "$TMUX_SESSION:u-$ACTOR" "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; while true; do hub; done" Enter
+          tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:u-$ACTOR" \
+            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; while true; do hub; done" Enter
 
-          tmux select-window -t "$TMUX_SESSION:u-$ACTOR"
-          sleep 2
+          tmate -S "$TMATE_SOCK" select-window -t "$TMUX_SESSION:u-$ACTOR"
 
-          upterm host --server wss://uptermd.upterm.dev --force-command "tmux attach -t $TMUX_SESSION" -- tmux attach -t "$TMUX_SESSION" > ~/upterm.log 2>&1 &
-          sleep 6
+          tmate -S "$TMATE_SOCK" wait tmate-ready 2>/dev/null || true
+          sleep 4
 
-          UPTERM_SSH=""
-          for i in $(seq 1 15); do
-            UPTERM_SSH=$(upterm session current 2>/dev/null | grep 'SSH Session:' | sed 's/^.*SSH Session: //')
-            [ -n "$UPTERM_SSH" ] && break
-            sleep 1
-          done
-          printf '%s' "${UPTERM_SSH:-unavailable}" > "$HUB_CONF/upterm_ssh"
+          TMATE_SSH=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
+          TMATE_WEB=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
 
-          export PASSWORD="${SESSION_PASS:-cloudhub}"
-          code-server --bind-addr 127.0.0.1:8081 --auth password > ~/code-server.log 2>&1 &
-          sleep 3
+          if [ "$TMATE_SSH" = "unavailable" ] || [ -z "$TMATE_SSH" ]; then
+            log "TMATE" "Not ready yet, retrying..."
+            sleep 6
+            TMATE_SSH=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
+            TMATE_WEB=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
+          fi
 
-          cloudflared tunnel --url http://127.0.0.1:8081 --no-autoupdate --http2-origin > ~/cf.log 2>&1 &
-
-          CF_URL=""
-          for i in $(seq 1 30); do
-            CF_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' ~/cf.log | head -n1)[ -n "$CF_URL" ] && break
-            sleep 1
-          done
-          printf '%s' "${CF_URL:-unavailable}" > "$HUB_CONF/cf_web"
+          printf '%s' "$TMATE_SSH" > "$HUB_CONF/tmate_ssh"
+          printf '%s' "$TMATE_WEB" > "$HUB_CONF/tmate_web"
 
           SHUTDOWN_AT=$(_compute_shutdown_at)
 
           log "START" "Session: $SESSION_LABEL | Actor: $ACTOR | Repo: $REPO"
           log "START" "Auto-commit: $AUTO_COMMIT every ${AUTO_COMMIT_INTERVAL}min"
           log "START" "Graceful shutdown at 350min (or earlier for large repos)"
-          log "LINK"  "SSH  (Upterm): $UPTERM_SSH"
-          log "LINK"  "WEB  (VS Code Server): ${CF_URL:-check cf.log}"
-          log "INFO"  "WEB password = value of GitHub secret PASS"
+          log "LINK"  "SSH  (direct tmate.io): $TMATE_SSH"
+          log "LINK"  "WEB  (direct tmate.io): $TMATE_WEB"
+          log "INFO"  "SSH note: press q on overlay, then you are in hub"
           log "INFO"  "Links window: Ctrl+B 2 (auto-refreshes every 30s)"
+          log "INFO"  "Scroll: Ctrl+B [  then arrows/PgUp  then q to exit"
           echo ""
 
           (
             while true; do
               sleep 90
-              if ! tmux has-session -t "$TMUX_SESSION" >/dev/null 2>&1; then
-                log "TMUX" "Session lost -- restarting..."
-                tmux new-session -d -s "$TMUX_SESSION" -n "u-$ACTOR" 2>/dev/null || true
+              if ! tmate -S "$TMATE_SOCK" list-sessions >/dev/null 2>&1; then
+                log "TMATE" "Session lost -- restarting..."
+                tmate -S "$TMATE_SOCK" new-session -d -s "$TMUX_SESSION" \
+                  -n "u-$ACTOR" 2>/dev/null || true
+                sleep 3
+                NEW_SSH=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
+                NEW_WEB=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_web}' 2>/dev/null || echo "unavailable")
+                printf '%s' "$NEW_SSH" > "$HUB_CONF/tmate_ssh"
+                printf '%s' "$NEW_WEB" > "$HUB_CONF/tmate_web"
+                log "TMATE" "New SSH: $NEW_SSH"
               fi
             done
           ) &
           WATCHER_PID=$!
 
-          if[ "$AUTO_COMMIT" != "off" ]; then
+          if [ "$AUTO_COMMIT" != "off" ]; then
             (
               INTERVAL_SECS=$(( AUTO_COMMIT_INTERVAL * 60 ))
               while true; do
                 sleep "$INTERVAL_SECS"
                 AMSG="Auto-commit: $(date -u '+%Y-%m-%d %H:%M UTC')"
-                if[ "$AUTO_COMMIT" = "global" ]; then
+                if [ "$AUTO_COMMIT" = "global" ]; then
                   OUT=$(gcommit "$AMSG" 2>&1)
                 else
                   OUT=$(commit "$AMSG" 2>&1)
@@ -1058,7 +1061,7 @@ jobs:
 
           while true; do
             NOW=$(date +%s)
-            if[ "$NOW" -ge "$SHUTDOWN_AT" ]; then
+            if [ "$NOW" -ge "$SHUTDOWN_AT" ]; then
               log "SHUTDOWN" "350min limit reached -- graceful exit"
               _do_shutdown_commit
               kill "$WATCHER_PID" 2>/dev/null || true
@@ -1067,13 +1070,14 @@ jobs:
               break
             fi
 
-            CLIENTS=$(tmux list-clients -t "$TMUX_SESSION" 2>/dev/null | wc -l)
+            CLIENTS=$(tmate -S "$TMATE_SOCK" list-clients 2>/dev/null | wc -l)
 
             if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
               if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
-                log "JOIN" "Terminal connected | active: $CLIENTS"
+                FRESH_SSH=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "$TMATE_SSH")
+                log "JOIN" "User connected | active: $CLIENTS | SSH: $FRESH_SSH"
               else
-                log "LEAVE" "Terminal disconnected | active: $CLIENTS"
+                log "LEAVE" "User disconnected | active: $CLIENTS"
               fi
               LAST_CLIENTS="$CLIENTS"
               TIMER=0
@@ -1085,7 +1089,9 @@ jobs:
               PROXY_STATUS="down"
               hub_proxy_alive && PROXY_STATUS="up"
               SHUTDOWN_AT=$(_compute_shutdown_at)
+              FRESH_SSH=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "$TMATE_SSH")
               log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | left: ~${MINS_LEFT}min | proxy: $PROXY_STATUS | clients: $CLIENTS"
+              log "HEARTBEAT" "SSH: $FRESH_SSH | WEB: $TMATE_WEB"
               hub_proxy_any_invalid && log "WARN" "Proxy account(s) INVALID -- use hub option 9"
               TIMER=0
             fi
@@ -1101,9 +1107,11 @@ jobs:
         run: |
           source /usr/local/lib/hubos/lib.sh 2>/dev/null || true
           echo "Auto-Save triggered"
-          for user_dir in "$WORKSPACES"/*/; do[ -d "$user_dir" ] || continue
+          for user_dir in "$WORKSPACES"/*/; do
+            [ -d "$user_dir" ] || continue
             USER="$(basename "$user_dir")"
-            for repo_dir in "$user_dir"*/; do[ -d "$repo_dir/.git" ] || continue
+            for repo_dir in "$user_dir"*/; do
+              [ -d "$repo_dir/.git" ] || continue
               hub_save_repo "$repo_dir" \
                 "Auto-save: runner exit $(date -u '+%Y-%m-%d %H:%M UTC')" \
                 "$USER"

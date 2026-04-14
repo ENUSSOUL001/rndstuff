@@ -38,7 +38,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 'latest'
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -998,7 +998,7 @@ jobs:
             "source ~/.bashrc; while true; do clear; hub_print_links; echo 'Auto-refreshes every 30s'; sleep 30; done" Enter
 
           tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:u-$ACTOR" \
-            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO' TERM=xterm-256color; source ~/.bashrc; clear; stty sane 2>/dev/null || true; while true; do hub; done" Enter
+            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; while true; do hub; done" Enter
 
           tmate -S "$TMATE_SOCK" select-window -t "$TMUX_SESSION:u-$ACTOR"
 
@@ -1019,35 +1019,26 @@ jobs:
           printf '%s' "$TMATE_WEB" > "$HUB_CONF/tmate_web"
 
           if [ -n "$SESSION_PASS" ]; then
-            ttyd --writable --check-origin=false --permit-arguments \
-              --port 7681 --interface 0.0.0.0 \
+            ttyd --writable --check-origin=false \
+              --port 7681 --interface 127.0.0.1 \
               --credential "user:$SESSION_PASS" \
               tmux -S "$TMATE_SOCK" attach-session -t "$TMUX_SESSION" \
               > ~/ttyd.log 2>&1 &
           else
-            ttyd --writable --check-origin=false --permit-arguments \
-              --port 7681 --interface 0.0.0.0 \
+            ttyd --writable --check-origin=false \
+              --port 7681 --interface 127.0.0.1 \
               tmux -S "$TMATE_SOCK" attach-session -t "$TMUX_SESSION" \
               > ~/ttyd.log 2>&1 &
           fi
+          sleep 3
 
-          for i in $(seq 1 20); do
-            if curl -sf http://127.0.0.1:7681 >/dev/null 2>&1; then
-              log "TTYD" "Ready on port 7681"
-              break
-            fi
-            log "TTYD" "Waiting... attempt $i/20"
-            sleep 2
-          done
-
-          cloudflared tunnel --url http://127.0.0.1:7681 \
-            --no-autoupdate --http2-origin --metrics 127.0.0.1:2000 \
-            > ~/cf.log 2>&1 &
+          cloudflared tunnel --url http://localhost:7681 \
+            --no-autoupdate --http2-origin > ~/cf.log 2>&1 &
 
           CF_URL=""
-          for i in $(seq 1 45); do
-            CF_URL=$(grep -oP 'https://[a-z0-9.-]+\.trycloudflare\.com' ~/cf.log | head -n1)
-            [ -n "$CF_URL" ] && curl -sf "$CF_URL" >/dev/null 2>&1 && break
+          for i in $(seq 1 30); do
+            CF_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' ~/cf.log | head -n1)
+            [ -n "$CF_URL" ] && break
             sleep 1
           done
           printf '%s' "${CF_URL:-unavailable}" > "$HUB_CONF/cf_web"
@@ -1060,9 +1051,8 @@ jobs:
           log "LINK"  "SSH  (anyone with link, no extra tools): $TMATE_SSH"
           log "LINK"  "WEB  (browser, asks for password):       ${CF_URL:-check cf.log}"
           log "INFO"  "WEB password = value of GitHub secret PASS"
-          log "INFO"  "If web shows 502: wait 30s, then refresh browser"
-          log "INFO"  "Laptop issue? Try: Ctrl+Shift+R (hard refresh) or incognito mode"
           log "INFO"  "SSH note: press q on overlay, then you are in hub"
+          log "INFO"  "If web blank on desktop: try incognito/different browser"
           log "INFO"  "Links window: Ctrl+B 2 (auto-refreshes every 30s)"
           log "INFO"  "Scroll: Ctrl+B [  then arrows/PgUp  then q to exit"
           echo ""

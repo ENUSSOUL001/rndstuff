@@ -70,6 +70,15 @@ jobs:
             iproute2
           pip install PyNaCl --break-system-packages -q
 
+      - name: Install Gotty
+        run: |
+          GOTTY_VER=$(curl -sf https://api.github.com/repos/yudai/gotty/releases/latest \
+            | jq -r '.tag_name' | sed 's/^v//')
+          wget -qO /tmp/gotty.tar.gz \
+            "https://github.com/yudai/gotty/releases/download/v${GOTTY_VER}/gotty_${GOTTY_VER}_linux_amd64.tar.gz"
+          tar -xzf /tmp/gotty.tar.gz -C /tmp
+          sudo install /tmp/gotty /usr/local/bin/gotty
+
       - name: Install Cloudflared
         run: |
           curl -L \
@@ -237,18 +246,22 @@ jobs:
           }
 
           hub_print_links() {
-            local tmate_ssh tmate_web
+            local tmate_ssh tmate_web cf_web
             tmate_ssh=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "not ready")
             tmate_web=$(cat "$HUB_CONF/tmate_web" 2>/dev/null || echo "not ready")
+            cf_web=$(cat "$HUB_CONF/cf_web" 2>/dev/null || echo "not ready")
             printf '\n'
             printf '  +------------------------------------------------------------------+\n'
-            printf '  |  SSH  (anyone with this link, no extra tools needed):           |\n'
+            printf '  |  SSH  (anyone with this link, no extra tools):                 |\n'
             printf '  |  %s\n' "$tmate_ssh"
             printf '  |  Termux: pkg install openssh && %s\n' "$tmate_ssh"
             printf '  |                                                                  |\n'
-            printf '  |  WEB  (browser, direct tmate.io session):                      |\n'
+            printf '  |  WEB  (browser, via Cloudflare Tunnel):                        |\n'
+            printf '  |  %s\n' "$cf_web"
+            printf '  |  No password - anyone with link can connect                    |\n'
+            printf '  |                                                                  |\n'
+            printf '  |  Backup Web (direct tmate.io):                                 |\n'
             printf '  |  %s\n' "$tmate_web"
-            printf '  |  No password required - tmate handles auth                     |\n'
             printf '  +------------------------------------------------------------------+\n'
             printf '\n'
           }
@@ -896,7 +909,7 @@ jobs:
           fi
           tail -n +1 -f ~/proxy.log &
 
-      - name: Launch tmate and Hub OS
+      - name: Launch tmate, Gotty, Cloudflare and Hub OS
         env:
           SESSION_LABEL: ${{ inputs.label || 'Cloud Hub OS' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -1008,13 +1021,31 @@ jobs:
           printf '%s' "$TMATE_SSH" > "$HUB_CONF/tmate_ssh"
           printf '%s' "$TMATE_WEB" > "$HUB_CONF/tmate_web"
 
+          gotty --address 127.0.0.1 --port 7681 --permit-write \
+            tmux -S "$TMATE_SOCK" attach -t "$TMUX_SESSION" \
+            > ~/gotty.log 2>&1 &
+          sleep 3
+
+          cloudflared tunnel --url http://localhost:7681 \
+            --no-autoupdate --http2-origin > ~/cf.log 2>&1 &
+
+          CF_URL=""
+          for i in $(seq 1 30); do
+            CF_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' ~/cf.log | head -n1)
+            [ -n "$CF_URL" ] && break
+            sleep 1
+          done
+          printf '%s' "${CF_URL:-unavailable}" > "$HUB_CONF/cf_web"
+
           SHUTDOWN_AT=$(_compute_shutdown_at)
 
           log "START" "Session: $SESSION_LABEL | Actor: $ACTOR | Repo: $REPO"
           log "START" "Auto-commit: $AUTO_COMMIT every ${AUTO_COMMIT_INTERVAL}min"
           log "START" "Graceful shutdown at 350min (or earlier for large repos)"
-          log "LINK"  "SSH  (direct tmate.io): $TMATE_SSH"
-          log "LINK"  "WEB  (direct tmate.io): $TMATE_WEB"
+          log "LINK"  "SSH  (anyone with link): $TMATE_SSH"
+          log "LINK"  "WEB  (Cloudflare Tunnel): $CF_URL"
+          log "LINK"  "WEB  (backup tmate.io): $TMATE_WEB"
+          log "INFO"  "All links: public access, no password required"
           log "INFO"  "SSH note: press q on overlay, then you are in hub"
           log "INFO"  "Links window: Ctrl+B 2 (auto-refreshes every 30s)"
           log "INFO"  "Scroll: Ctrl+B [  then arrows/PgUp  then q to exit"
@@ -1091,7 +1122,7 @@ jobs:
               SHUTDOWN_AT=$(_compute_shutdown_at)
               FRESH_SSH=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "$TMATE_SSH")
               log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | left: ~${MINS_LEFT}min | proxy: $PROXY_STATUS | clients: $CLIENTS"
-              log "HEARTBEAT" "SSH: $FRESH_SSH | WEB: $TMATE_WEB"
+              log "HEARTBEAT" "SSH: $FRESH_SSH | WEB(CF): $CF_URL | WEB(tmate): $TMATE_WEB"
               hub_proxy_any_invalid && log "WARN" "Proxy account(s) INVALID -- use hub option 9"
               TIMER=0
             fi

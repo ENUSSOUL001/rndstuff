@@ -998,7 +998,7 @@ jobs:
             "source ~/.bashrc; while true; do clear; hub_print_links; echo 'Auto-refreshes every 30s'; sleep 30; done" Enter
 
           tmate -S "$TMATE_SOCK" send-keys -t "$TMUX_SESSION:u-$ACTOR" \
-            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO'; source ~/.bashrc; clear; while true; do hub; done" Enter
+            "export SESSION_LABEL='$SESSION_LABEL' GITHUB_REPOSITORY='$REPO' TERM=xterm-256color; source ~/.bashrc; clear; stty sane 2>/dev/null || true; while true; do hub; done" Enter
 
           tmate -S "$TMATE_SOCK" select-window -t "$TMUX_SESSION:u-$ACTOR"
 

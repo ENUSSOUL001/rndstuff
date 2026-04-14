@@ -58,6 +58,7 @@ jobs:
           sudo apt-get install -y -qq \
             clang \
             tmux \
+            ttyd \
             dialog \
             jq \
             python3-pip \
@@ -70,15 +71,6 @@ jobs:
             iproute2 \
             screen
           pip install PyNaCl --break-system-packages -q
-
-      - name: Install ttyd (Web Terminal)
-        run: |
-          TTYD_VER=$(curl -sf https://api.github.com/repos/tsl0922/ttyd/releases/latest \
-            | jq -r '.tag_name')
-          wget -qO /tmp/ttyd \
-            "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VER}/ttyd.x86_64"
-          sudo install /tmp/ttyd /usr/local/bin/ttyd
-          chmod +x /usr/local/bin/ttyd
 
       - name: Install Cloudflared
         run: |

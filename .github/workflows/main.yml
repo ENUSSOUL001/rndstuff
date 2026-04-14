@@ -70,6 +70,14 @@ jobs:
             iproute2
           pip install PyNaCl --break-system-packages -q
 
+      - name: Install ttyd
+        run: |
+          TTYD_VER=$(curl -sf https://api.github.com/repos/tsl0922/ttyd/releases/latest \
+            | jq -r '.tag_name')
+          wget -qO /tmp/ttyd \
+            "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VER}/ttyd.x86_64"
+          sudo install /tmp/ttyd /usr/local/bin/ttyd
+
       - name: Install Cloudflared
         run: |
           curl -L \
@@ -243,16 +251,13 @@ jobs:
             cf_web=$(cat "$HUB_CONF/cf_web" 2>/dev/null || echo "not ready")
             printf '\n'
             printf '  +------------------------------------------------------------------+\n'
-            printf '  |  SSH  (anyone with this link, no extra tools):                 |\n'
+            printf '  |  SSH  (anyone with this link, no extra tools needed):           |\n'
             printf '  |  %s\n' "$tmate_ssh"
             printf '  |  Termux: pkg install openssh && %s\n' "$tmate_ssh"
             printf '  |                                                                  |\n'
-            printf '  |  WEB  (browser, via Cloudflare Tunnel):                        |\n'
+            printf '  |  WEB  (browser, ask for password on entry):                    |\n'
             printf '  |  %s\n' "$cf_web"
-            printf '  |  No password - anyone with link can connect                    |\n'
-            printf '  |                                                                  |\n'
-            printf '  |  Backup Web (direct tmate.io):                                 |\n'
-            printf '  |  %s\n' "$tmate_web"
+            printf '  |  Password: value of GitHub secret PASS                         |\n'
             printf '  +------------------------------------------------------------------+\n'
             printf '\n'
           }
@@ -900,12 +905,13 @@ jobs:
           fi
           tail -n +1 -f ~/proxy.log &
 
-      - name: Launch tmate and Cloudflare Tunnel
+      - name: Launch tmate, ttyd, Cloudflare and Hub OS
         env:
           SESSION_LABEL: ${{ inputs.label || 'Cloud Hub OS' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           AUTO_COMMIT: ${{ inputs.auto_commit || 'off' }}
           AUTO_COMMIT_INTERVAL: ${{ inputs.auto_commit_interval || '30' }}
+          SESSION_PASS: ${{ secrets.PASS }}
         run: |
           ACTOR="${{ github.actor }}"
           REPO="${{ github.repository }}"
@@ -1012,13 +1018,36 @@ jobs:
           printf '%s' "$TMATE_SSH" > "$HUB_CONF/tmate_ssh"
           printf '%s' "$TMATE_WEB" > "$HUB_CONF/tmate_web"
 
-          cloudflared tunnel --url http://localhost:2222 \
-            --no-autoupdate --http2-origin > ~/cf.log 2>&1 &
+          if [ -n "$SESSION_PASS" ]; then
+            ttyd --writable --check-origin=false --permit-arguments \
+              --port 7681 --interface 0.0.0.0 \
+              --credential "user:$SESSION_PASS" \
+              tmux -S "$TMATE_SOCK" attach-session -t "$TMUX_SESSION" \
+              > ~/ttyd.log 2>&1 &
+          else
+            ttyd --writable --check-origin=false --permit-arguments \
+              --port 7681 --interface 0.0.0.0 \
+              tmux -S "$TMATE_SOCK" attach-session -t "$TMUX_SESSION" \
+              > ~/ttyd.log 2>&1 &
+          fi
+
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:7681 >/dev/null 2>&1; then
+              log "TTYD" "Ready on port 7681"
+              break
+            fi
+            log "TTYD" "Waiting... attempt $i/20"
+            sleep 2
+          done
+
+          cloudflared tunnel --url http://127.0.0.1:7681 \
+            --no-autoupdate --http2-origin --metrics 127.0.0.1:2000 \
+            > ~/cf.log 2>&1 &
 
           CF_URL=""
-          for i in $(seq 1 30); do
-            CF_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' ~/cf.log | head -n1)
-            [ -n "$CF_URL" ] && break
+          for i in $(seq 1 45); do
+            CF_URL=$(grep -oP 'https://[a-z0-9.-]+\.trycloudflare\.com' ~/cf.log | head -n1)
+            [ -n "$CF_URL" ] && curl -sf "$CF_URL" >/dev/null 2>&1 && break
             sleep 1
           done
           printf '%s' "${CF_URL:-unavailable}" > "$HUB_CONF/cf_web"
@@ -1028,11 +1057,12 @@ jobs:
           log "START" "Session: $SESSION_LABEL | Actor: $ACTOR | Repo: $REPO"
           log "START" "Auto-commit: $AUTO_COMMIT every ${AUTO_COMMIT_INTERVAL}min"
           log "START" "Graceful shutdown at 350min (or earlier for large repos)"
-          log "LINK"  "SSH  (tmate - FAST): $TMATE_SSH"
-          log "LINK"  "WEB  (cloudflared):  $CF_URL"
-          log "LINK"  "WEB  (tmate backup): $TMATE_WEB"
-          log "INFO"  "All links: public access, no password"
-          log "INFO"  "SSH: use 'ssh -t' for best experience"
+          log "LINK"  "SSH  (anyone with link, no extra tools): $TMATE_SSH"
+          log "LINK"  "WEB  (browser, asks for password):       ${CF_URL:-check cf.log}"
+          log "INFO"  "WEB password = value of GitHub secret PASS"
+          log "INFO"  "If web shows 502: wait 30s, then refresh browser"
+          log "INFO"  "Laptop issue? Try: Ctrl+Shift+R (hard refresh) or incognito mode"
+          log "INFO"  "SSH note: press q on overlay, then you are in hub"
           log "INFO"  "Links window: Ctrl+B 2 (auto-refreshes every 30s)"
           log "INFO"  "Scroll: Ctrl+B [  then arrows/PgUp  then q to exit"
           echo ""
@@ -1108,7 +1138,7 @@ jobs:
               SHUTDOWN_AT=$(_compute_shutdown_at)
               FRESH_SSH=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "$TMATE_SSH")
               log "HEARTBEAT" "uptime: ${UPTIME_MIN}min | left: ~${MINS_LEFT}min | proxy: $PROXY_STATUS | clients: $CLIENTS"
-              log "HEARTBEAT" "SSH: $FRESH_SSH | WEB(CF): $CF_URL | WEB(tmate): $TMATE_WEB"
+              log "HEARTBEAT" "SSH: $FRESH_SSH | WEB: ${CF_URL:-check cf.log}"
               hub_proxy_any_invalid && log "WARN" "Proxy account(s) INVALID -- use hub option 9"
               TIMER=0
             fi

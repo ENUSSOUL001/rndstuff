@@ -33,10 +33,10 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -278,27 +278,25 @@ jobs:
           }
 
           hub_print_links() {
-            local tmate_ssh tmate_ssh2 cf_web
+            local tmate_ssh cf_web tmate_host tmate_user tmate_ed25519
             tmate_ssh=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "not ready")
-            tmate_ssh2=$(cat "$HUB_CONF/tmate_ssh2" 2>/dev/null || echo "not ready")
             cf_web=$(cat "$HUB_CONF/cf_web" 2>/dev/null || echo "not ready")
-            local tmate_host tmate_user
             tmate_host=$(echo "$tmate_ssh" | awk '{print $2}' | cut -d@ -f2 2>/dev/null || echo "")
             tmate_user=$(echo "$tmate_ssh" | awk '{print $2}' | cut -d@ -f1 2>/dev/null || echo "")
+            tmate_ed25519="ssh -o HostKeyAlgorithms=ssh-ed25519 ${tmate_user}@${tmate_host}"
             printf '\n'
             printf '  +--------------------------------------------------------------------+\n'
-            printf '  |  SSH RSA  (standard):                                             |\n'
+            printf '  |  SSH (standard):                                                  |\n'
             printf '  |  %s\n' "$tmate_ssh"
             printf '  |                                                                    |\n'
-            printf '  |  SSH Ed25519  (use for Termius -- avoids RSA host key bug):       |\n'
-            printf '  |  %s\n' "$tmate_ssh2"
+            printf '  |  SSH (Termius fix -- avoids RSA host key bug):                    |\n'
+            printf '  |  %s\n' "$tmate_ed25519"
             if [ -n "$tmate_host" ]; then
-            printf '  |                                                                    |\n'
-            printf '  |  Termius: Hostname=%-20s  Port=22              |\n' "$tmate_host"
-            printf '  |           Username=%-44s|\n' "$tmate_user"
+            printf '  |  Termius: Host=%-18s Port=22 User=%-12s|\n' "$tmate_host" "$tmate_user"
+            printf '  |  Command field: -o HostKeyAlgorithms=ssh-ed25519                 |\n'
             fi
             printf '  |                                                                    |\n'
-            printf '  |  WEB (shellinabox, any browser, any device):                     |\n'
+            printf '  |  WEB (any browser, any device):                                  |\n'
             printf '  |  %s\n' "$cf_web"
             printf '  |  Web password = value of GitHub secret PASS                       |\n'
             printf '  +--------------------------------------------------------------------+\n'
@@ -348,33 +346,6 @@ jobs:
             _run_shell
           fi
 
-          _read_pass_masked() {
-            local pass="" char
-            while IFS= read -r -s -n1 char; do
-              case "$char" in
-                ''|$'\r'|$'\n')
-                  break
-                  ;;
-                $'\x7f'|$'\x08')
-                  if [ ${#pass} -gt 0 ]; then
-                    pass="${pass%?}"
-                    printf '\b \b'
-                  fi
-                  ;;
-                $'\x03')
-                  printf '\n'
-                  exit 1
-                  ;;
-                *)
-                  pass+="$char"
-                  printf '*'
-                  ;;
-              esac
-            done
-            printf '\n'
-            printf '%s' "$pass"
-          }
-
           MAX_ATTEMPTS=3
           ATTEMPTS=0
 
@@ -395,11 +366,17 @@ jobs:
             printf '  Username: '
             read -r _HUB_USER
 
-            printf '  Password: '
-            _HUB_PASS=$(_read_pass_masked)
+            _HUB_PASS=$(dialog --stdout --passwordbox "  Password (input is masked with *):" 8 52)
+            DIALOG_EXIT=$?
+            clear
+
+            if [ "$DIALOG_EXIT" -ne 0 ]; then
+              ATTEMPTS=$(( ATTEMPTS + 1 ))
+              sleep 1
+              continue
+            fi
 
             if [ "$_HUB_PASS" = "$SESSION_PASS" ]; then
-              clear
               printf '\033[1;32m  Access granted. Welcome!\033[0m\n\n'
               sleep 1
               _run_shell
@@ -745,7 +722,7 @@ jobs:
           |  links         -> show SSH / web links                          |
           |  hub           -> back to main menu                             |
           |                                                                  |
-          |  Termius / Termux scroll and copy:                               |
+          |  Scroll and copy:                                                 |
           |  Ctrl+B [      enter scroll mode (vi keys)                      |
           |  v             start selection                                   |
           |  y             copy selection                                    |
@@ -1066,6 +1043,8 @@ jobs:
           chmod 600 ~/.ssh/authorized_keys
 
           _launch_tmate() {
+            rm -f "$TMATE_SOCK"
+
             tmate -S "$TMATE_SOCK" new-session -d \
               -s "$TMUX_SESSION" -n "u-$ACTOR" -x 220 -y 50 \
               "/usr/local/bin/hub-session"
@@ -1074,25 +1053,21 @@ jobs:
               "tail -f ~/proxy.log"
 
             tmate -S "$TMATE_SOCK" new-window -t "$TMUX_SESSION" -n "links" \
-              "bash -c 'source ~/.bashrc; while true; do clear; hub_print_links; echo \"Ctrl+B 1 for hub window\"; sleep 30; done'"
+              "bash -c 'source /usr/local/lib/hubos/lib.sh; while true; do clear; hub_print_links; echo \"Ctrl+B 1 for hub window\"; sleep 30; done'"
 
             tmate -S "$TMATE_SOCK" select-window -t "$TMUX_SESSION:u-$ACTOR"
 
             tmate -S "$TMATE_SOCK" wait tmate-ready 2>/dev/null || true
             sleep 5
 
-            local ssh ssh2
+            local ssh
             ssh=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_ssh}' 2>/dev/null || echo "")
-            ssh2=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_ssh2}' 2>/dev/null || echo "")
-
             if [ -z "$ssh" ]; then
               sleep 5
               ssh=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_ssh}' 2>/dev/null || echo "unavailable")
-              ssh2=$(tmate -S "$TMATE_SOCK" display -p '#{tmate_ssh2}' 2>/dev/null || echo "unavailable")
             fi
 
-            printf '%s' "$ssh"  > "$HUB_CONF/tmate_ssh"
-            printf '%s' "$ssh2" > "$HUB_CONF/tmate_ssh2"
+            printf '%s' "$ssh" > "$HUB_CONF/tmate_ssh"
             echo "$ssh"
           }
 
@@ -1145,10 +1120,9 @@ jobs:
           trap '_signal_handler' SIGTERM SIGINT
 
           TMATE_SSH=$(_launch_tmate)
-          TMATE_SSH2=$(cat "$HUB_CONF/tmate_ssh2" 2>/dev/null || echo "unavailable")
-
           TMATE_HOST=$(echo "$TMATE_SSH" | awk '{print $2}' | cut -d@ -f2 2>/dev/null || echo "")
           TMATE_USER=$(echo "$TMATE_SSH" | awk '{print $2}' | cut -d@ -f1 2>/dev/null || echo "")
+          TMATE_ED25519_CMD="ssh -o HostKeyAlgorithms=ssh-ed25519 ${TMATE_USER}@${TMATE_HOST}"
 
           sudo shellinaboxd \
             --port=4200 \
@@ -1176,27 +1150,28 @@ jobs:
           log "START" "Auto-commit: $AUTO_COMMIT every ${AUTO_COMMIT_INTERVAL}min"
           echo ""
           echo "========================================================================"
-          echo "  SSH RSA    : $TMATE_SSH"
-          echo "  SSH Ed25519: $TMATE_SSH2"
+          echo "  SSH (standard):     $TMATE_SSH"
+          echo ""
+          echo "  SSH (Termius fix -- forces ed25519 host key, avoids rsa-sha2-512 bug):"
+          echo "  $TMATE_ED25519_CMD"
           echo ""
           if [ -n "$TMATE_HOST" ]; then
           echo "  Termius setup:"
           echo "    Hostname : $TMATE_HOST"
           echo "    Port     : 22"
           echo "    Username : $TMATE_USER"
+          echo "    SSH key  : your GitHub key (or leave auth blank for shared access)"
+          echo "    Advanced > SSH > Command: -o HostKeyAlgorithms=ssh-ed25519"
           echo ""
-          echo "  If Termius shows 'Unable to exchange encryption keys':"
-          echo "    1. Use the Ed25519 link above instead of RSA (different token)"
-          echo "    2. OR: Termius app > Settings > Security > Known Hosts > delete $TMATE_HOST"
-          echo "    3. OR: Use the web link below (no SSH client needed)"
+          echo "  If Termius still fails: Known Hosts > delete $TMATE_HOST > retry"
           fi
           echo ""
-          echo "  WEB (shellinabox, works on desktop and mobile, any browser):"
+          echo "  WEB (shellinabox -- no websocket, works everywhere):"
           echo "  ${CF_URL:-check cf.log}"
-          echo "  Web login: any username, password = GitHub secret PASS"
+          echo "  Login: any username | Password = GitHub secret PASS"
           echo ""
-          echo "  Tmux windows: Ctrl+B 1=hub Ctrl+B 2=proxy-log Ctrl+B 3=links"
-          echo "  Scroll: Ctrl+B [ then arrows/PgUp then q | Copy: v=select y=copy Ctrl+B ]=paste"
+          echo "  Tmux: Ctrl+B 1=hub  Ctrl+B 2=proxy-log  Ctrl+B 3=links"
+          echo "  Scroll: Ctrl+B [  arrows/PgUp  q=exit | Copy: v  y  Ctrl+B ]"
           echo "========================================================================"
           echo ""
 
@@ -1205,12 +1180,12 @@ jobs:
               sleep 10
               if ! tmate -S "$TMATE_SOCK" list-sessions >/dev/null 2>&1; then
                 log "TMATE" "Session died -- restarting..."
-                rm -f "$TMATE_SOCK"
                 NEW_SSH=$(_launch_tmate)
-                NEW_SSH2=$(cat "$HUB_CONF/tmate_ssh2" 2>/dev/null || echo "unavailable")
-                log "TMATE" "New SSH RSA    : $NEW_SSH"
-                log "TMATE" "New SSH Ed25519: $NEW_SSH2"
-                log "TMATE" "New WEB        : ${CF_URL:-check cf.log}"
+                NEW_HOST=$(echo "$NEW_SSH" | awk '{print $2}' | cut -d@ -f2 2>/dev/null || echo "")
+                NEW_USER=$(echo "$NEW_SSH" | awk '{print $2}' | cut -d@ -f1 2>/dev/null || echo "")
+                log "TMATE" "New SSH    : $NEW_SSH"
+                log "TMATE" "New ed25519: ssh -o HostKeyAlgorithms=ssh-ed25519 ${NEW_USER}@${NEW_HOST}"
+                log "TMATE" "WEB        : ${CF_URL:-check cf.log}"
               fi
             done
           ) &
@@ -1249,7 +1224,7 @@ jobs:
             if [ "$CLIENTS" != "$LAST_CLIENTS" ]; then
               if [ "$CLIENTS" -gt "$LAST_CLIENTS" ]; then
                 FRESH_SSH=$(cat "$HUB_CONF/tmate_ssh" 2>/dev/null || echo "$TMATE_SSH")
-                log "JOIN" "User connected | active: $CLIENTS | SSH: $FRESH_SSH"
+                log "JOIN" "User connected | active: $CLIENTS | $FRESH_SSH"
               else
                 log "LEAVE" "User disconnected | active: $CLIENTS"
               fi
